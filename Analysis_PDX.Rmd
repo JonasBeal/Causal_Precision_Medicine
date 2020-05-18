@@ -1,0 +1,1394 @@
+---
+title: "Precision medicine and causality - V7 with RF"
+author: "Jonas BÉAL"
+date: "04/26/2020"
+output:
+  html_document:
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Paths
+original_path <- normalizePath(getwd())
+base_folder <- dirname(original_path)
+knitr::opts_knit$set(root.dir = base_folder)
+
+#Packages
+if (!require("pacman")) install.packages("pacman")
+list.of.packages <- c("readxl","knitr","corrplot","ggfortify","reshape2","tidyverse","gridExtra","magrittr", "tictoc", "factoextra", "ggrepel","FactoMineR", "broom", "ggstance", "paletteer", "patchwork", "nnet", "DescTools", "SuperLearner", "randomForestSRC", "ggpubr")
+pacman::p_load(list.of.packages, character.only = TRUE)
+select <- dplyr::select
+```
+
+This notebook accompanies the article entitled:
+
+> Causal inference with multiple versions of treatment and application to personalized medicine
+
+It contains the investigation on PDX data referenced as section 5 of the article.
+
+
+# Objectives and methods
+
+We want to perform a quantitative evaluation of precision medicine (PM) strategies with observational data. So we will emulate target trials in the potential outcomes framework in order to estimate our causal effects of interest.
+
+## Target trials
+
+![Target trials to estimate causal effect of precision medicine (PM) algorithm versus different controls. Patients are first screened according to their eligibility for the algorithm: based on their genomic characteristics patients are recommended a specific treatment (eligible) or not (no eligible). Then eligible patients are randomized and assigned either to PM-directed arm or to one of the alternative control arms (CE_1, CE_2 or CE_3)](Manuscript PreMedCaus/Pictures/Target_Trials.png)
+
+We define 3 different target trials comparing a precision medicine arm with 3 different control arms therefore defining 3 different causal effects CE1/CE2/CE3.
+
+Our first causal effect of interest *quantifies the effect of PM versus a simple control*, called **CE1** in this document. In practice, this causal effect corresponds to the expected gain compared a single-version reference/standard of care. This reference treatment can also be understood as the absence of treatment in some cases.
+
+Our second causal effect of interest *quantifies the PM improvement compared to the treatments effectively given in the real cohort, i.e. the physician's choice*, called **CE2** in this document. We assume that treatment assignments in observational data have their own rationale and we compare our PM algorithm to this rationale. In practice, this causal effect compare the validity of treatment assignment in the observational data and the potential re-assignement of treatments that would have been performed by the PM algorithm.
+
+Our third causal effect of interest is to *quantify the relevance of treatment assignment, i.e the potential improvement of PM treatment assignement compared to a random assignment of the same versions of treatment*, called **CE3** in this document. 
+
+All these effects are defined only for PM-eligible patients, i.e for patients whose mutations results in a personalized treatment recommendation. For non-eligible patients it does not make sense to quantify the impact of the PM algorithm and to compare it with a control.
+
+## Potential outcomes framework
+
+We will use the potential outcomes framework to estimates the causal effects described in previous section with observational data. Below, we summarize very briefly the variables we use to model our precision medicine settings. Please refer to the article for a detailed description of potential outcomes framework, counterfactual variables and the impact of the multiplicity of versions of treatment.
+
+![Causal diagram in Precision Medicine](Manuscript PreMedCaus/Pictures/DAG_multiple.png)
+
+We have:
+
+  * **C**, the patient covariates, in our case mainly some biomarkers based on mutations that can help define the best personalized treatment. 
+<!--**W** is another kind of biomarker confusing uniquely the relation betwwen A and K. We will have no W-type covariates in the present simulation--> 
+  * **A**, the treatment status, in our case hase the patient been treated with an anti-cancer drug ($A=1$) or with the control treated/left untreated ($A=0$)
+  * **K**, the versions of treatment, in our case the precise drug given to the patient. For $A=1$, K will be one of the three possible personalized drug, $\mathcal{K}^{1} = \{k^{1,1}, k^{1,2}, k^{1,2}\}$. More simply, $\mathcal{K}^{0}=\{k^0\}$ depends on the definition of the controls
+  * **Y**, the treatment strategy outcome, like tumour size
+
+# PDX data
+
+## Background
+
+We will base our analysis on a dataset of Patient-Derived Xenografts (PDX) from [Gao et al.](https://doi.org/10.1038/nm.3954). These are patients tumours implanted in mice. Since you can implant several pieces of the same tumour in several mice, you have the opportunity to test different drugs on the same tumour (same patient of origin). In a way, we have access to some counterfactuals values. It may help us to evaluate our ability to recover real causal effects with dedicated statistical methods.
+
+Each patient has been screened for different drugs (not the same subset of drugs for all patients). The response was determined by comparing tumor volume change at time $t$ to tumor volume at time $t_0$. Several metrics are computed:
+
+$TumourVolumeChange(\%) = \Delta Vol_t = 100\% \times \dfrac{V_t-V_{t_0}}{V_t}$
+
+$BestResponse = min(\Delta Vol_t), t>10d$
+
+$AvgResponse_t = mean(\Delta Vol_i, 0 \leq i\leq t)$
+
+$BestAvgResponse = min(AvgResponse_t), t>10d$
+
+
+We will mainly focus on $BestAvgResponse$. This metric "captures a combination of speed, strength and durability of response into a single value". Qualitatively, lower values correspond to more efficient drugs.
+
+We also define the $ResponseCategory$ provided and based on mRECIST criteria. We re-process the data and define a binary variable $ResponseBin$ which is 0 when the combination tumour-drug experienced a progressive disease and 1 otherwise (complete response, partial response or stable disease).
+
+Last, but not least, we have omics profiles for many of these tumours with information on mutations/CNA and RNA. Only mutations/CNA are used in the present example.
+
+## Import data
+
+Data is imported from Supplementary Material of the paper. Tissue of origin of the tumour is recovered from Xeva R package.
+
+```{r import, echo=FALSE, message=FALSE, warning=FALSE}
+tic()
+PDX_clin_sens <- readxl::read_xlsx("PDX/Data/Novartis/nm.3954-S2.xlsx", sheet = 5) %>%
+  rename(PATIENT_ID=Model)
+my_models <- PDX_clin_sens$PATIENT_ID %>% unique
+
+#From repo
+# PDXE <- downloadXevaSet(name="PDXE", saveDir="XevaSet")
+# PDXE_tissue <- PDXE@model %>% select(patient.id, tissue) %>%
+#   rename(PATIENT_ID=patient.id, Tissue=tissue) %>%
+#   distinct
+# save(PDXE_tissue, file = "PDXE_tissue.RData")
+load("PDX/Data/Novartis/PDXE_tissue.RData")
+
+PDX_clin <- full_join(PDXE_tissue, PDX_clin_sens) %>%
+  mutate(Tissue=if_else(is.na(Tissue), "Unknown", Tissue),
+         ResponseBin=if_else(ResponseCategory %in% c("PD"
+                                                     #"SD-->PD", "SD-->-->PD", "SD"
+                                                     ),
+                             0, 1)) #%>%
+  #mutate(BestAvgResponse=log(TimeToDouble))
+
+tibble_transpose <- function(df_input){
+  df_output <- df_input %>% gather(var, value, -Sample) %>%
+    spread(Sample, value) %>%
+    rename(PATIENT_ID=var) %>% 
+    type_convert
+}
+
+#Import PDX RNA data
+# PDX_RNA <- read_xlsx("PDX/Data/Novartis/nm.3954-S2.xlsx", sheet = 1) %>%
+#   tibble_transpose %>%
+#   filter(PATIENT_ID %in% my_models) %>%
+#   column_to_rownames(var="PATIENT_ID")
+# RNA_patients <- rownames(PDX_RNA)
+# PDX_RNA %<>%
+#   mutate_all(function(x) log2(x+1)) %>%
+#   mutate(PATIENT_ID=RNA_patients) %>%
+#   select(PATIENT_ID, everything()) %>%
+#   filter(PATIENT_ID %in% my_models)
+
+#Import PDX mutations data
+PDX_mut <- read_xlsx("PDX/Data/Novartis/nm.3954-S2.xlsx", sheet = 3) %>%
+  filter(#!Category %in% c("Amp5", "Amp8", "Del0.8"),
+         Sample %in% my_models) %>%
+  mutate(Label=strsplit(Details, ",") %>% lapply(`[[`, 1)) %>%
+  rename(PATIENT_ID=Sample) %>%
+  filter(PATIENT_ID %in% my_models)
+
+print("Done")
+```
+
+## Overview of data and summary plots
+
+Before stdying precision medicine trials with PDX data, we provide below a very generic description of the whole PDX dataset for readers who would like to familiarize themselves with it and have a more global vision.
+
+### Size and sparsity
+
+The dataset is composed of `r length(unique(PDX_clin$PATIENT_ID))` PDX models and `r length(unique(PDX_clin$Treatment))` have been tested. Nevertheless, the data matrix is quite sparse since not all drugs have been tested for all patients.
+
+```{r visualize_sparsity, echo=FALSE, message=FALSE, warning=FALSE}
+#paletteer_d("ggsci::default_uchicago")
+colors_tissues <- c("GC"="#800000FF", "CRC"="#FFA319FF",
+                    "PDAC"="#8A9045FF", "BRCA"="#155F83FF",
+                    "NSCLC"="#C16622FF", "CM"="#58593FFF",
+                    "Unknown"="#767676FF")
+
+
+
+plot_data <- expand_grid(PATIENT_ID=unique(PDX_clin$PATIENT_ID),
+                 Treatment=unique(PDX_clin$Treatment)) %>%
+  left_join(select(PDX_clin, PATIENT_ID, Tissue) %>% distinct,
+            by="PATIENT_ID") %>%
+  left_join(select(PDX_clin, PATIENT_ID, Treatment) %>% mutate(Screened=1),
+            by=c("PATIENT_ID", "Treatment")) %>%
+  mutate(Screened=if_else(is.na(Screened), 0, Screened)) %>%
+  arrange(Tissue) %>%
+  mutate(PATIENT_ID=factor(PATIENT_ID, levels = .$PATIENT_ID %>% unique)) %>%
+  mutate(Treatment=factor(Treatment, levels = group_by(., Treatment) %>%
+                            summarise(S=sum(Screened)) %>%
+                            arrange(desc(S)) %>% .$Treatment))
+  
+p_tile <- ggplot(plot_data) +
+  geom_tile(aes(x=PATIENT_ID, y=Treatment, fill=Tissue, alpha=Screened),
+            color="white") +
+  labs(x="PDX models") +
+  scale_fill_manual(values=colors_tissues) +
+  guides(alpha=FALSE) +
+  theme_pubclean() +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_text(size=8),
+        legend.position = "bottom")
+
+p_bar <- plot_data %>%
+  group_by(Treatment) %>% summarise(S=sum(Screened)) %>%
+  ggplot() +
+  geom_barh(aes(y=Treatment, x=S),
+           stat="identity") +
+  labs(x="Number of screened PDX") +
+  theme_pubclean() +
+  theme(#axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        legend.position = "right",
+        panel.grid.major.y = element_blank())
+  
+egg::ggarrange(p_tile, p_bar, nrow = 1,
+               widths = c(2,1),
+               top = "PDX drug screening")
+```
+
+Some have been tested in a comprehensive subset of PDX models (LEE011, binimetinib...) but most of them have been tested accordig to cancer-specific patterns.
+
+### Efficience of drugs
+
+Let's first observe the differences between untreated and treated patients (whatever treatment they receive).
+
+```{r visualize_untreated_treated, echo=FALSE, message=FALSE, warning=FALSE}
+
+plot_data <- PDX_clin %>%
+  mutate(Status=if_else(Treatment=="untreated",
+                        "Untreated", "Treated"))
+
+p_1 <- ggplot(plot_data) +
+  geom_density(aes(x=BestAvgResponse, fill=Status),
+               alpha=0.5) +
+  scale_fill_manual(values=c("Treated"="#02401BFF",
+                             "Untreated"="#972D15FF")) +
+  labs(#title="Distribution of BestAvgResponse metric across all patients and drugs",
+       y="Density") +
+  theme_pubclean() +
+  guides(fill=FALSE)
+
+p_2 <- plot_data %>% group_by(PATIENT_ID, Status, Tissue) %>%
+  summarise(S=mean(BestAvgResponse)) %>%
+  pivot_wider(names_from = Status, values_from=S) %>%
+  filter(!is.na(Treated), !is.na(Untreated)) %>%
+  ggplot(aes(x=Untreated, y=Treated)) +
+  geom_point() +
+  theme_pubclean() +
+  stat_cor(method = "pearson") +
+  geom_smooth(method=lm, formula = y~x) +
+  labs(#title="Correlation between responses",
+       x="BestAvgResponse when untreated",
+       y="BestAvgResponse when treated\n(averaged accross all tested drugs)")
+
+p_3 <- group_by(plot_data, Status) %>% summarise(Prop=mean(ResponseBin)) %>%
+  ggplot(aes(x=Status, y=Prop, fill=Status)) +
+  geom_bar(stat = "identity") +
+  theme_pubclean() +
+  scale_fill_manual(values=c("Treated"="#02401BFF",
+                             "Untreated"="#972D15FF")) +
+  labs(y="Prop. responders") 
+
+#egg::ggarrange(p_1, p_2, nrow = 2, heights = c(1,1))
+
+(p_1 + p_3)/p_2 +
+  plot_layout(heights = c(1,2), guides = 'collect') & theme(legend.position = 'top')
+```
+
+Treated tumours have, in average, decreased volume. Besides, response metric when treated and untreated are significantly correlated, supporting the hypothesis of a latent tumour aggressiveness factor.
+
+Assuming $BestAvgResponse$ when untreated is a good proxy for Aggressiveness, is it evenly distributed among cancer tissues?
+
+```{r untreated_per_tissue, echo=FALSE, message=FALSE, warning=FALSE}
+
+filter(plot_data, Status=="Untreated", Tissue!="Unknown") %>%
+  group_by(Tissue) %>%
+  summarise(M=mean(BestAvgResponse)) %>%
+  ggplot(aes(x=Tissue, y=M)) +
+  geom_bar(stat = "identity", aes(fill=Tissue)) +
+  scale_fill_manual(values=colors_tissues) +
+  theme_pubclean() +
+  labs(y="Mean BestAvgResponse when untreated")
+  
+
+```
+
+Analysis per tissue, based on binary Responder status:
+
+```{r visualize_untreated_treated_tissue, echo=FALSE, message=FALSE, warning=FALSE}
+
+group_by(plot_data, Tissue, Status) %>% summarise(Prop=mean(ResponseBin)) %>%
+  filter(Tissue!="Unknown") %>%
+  ggplot(aes(x=Status, y=Prop, fill=Status)) +
+  geom_bar(stat = "identity") +
+  theme_pubclean() +
+  scale_fill_manual(values=c("Treated"="#02401BFF",
+                             "Untreated"="#972D15FF")) +
+  facet_grid(.~Tissue) +
+  labs(y="Prop. responders") 
+
+```
+
+All in all, CM tumours appear a little bit more aggressive.
+
+Now, what about difference between drugs?
+
+```{r visualize_efficience, echo=FALSE, message=FALSE, warning=FALSE}
+
+p_1 <- filter(plot_data, Status=="Treated") %>%
+  ggplot(aes(y=reorder(Treatment, BestAvgResponse, FUN = median),
+                     x=BestAvgResponse)) +
+  geom_boxploth(varwidth = T) + 
+  labs(x="Average BestAvgResponse per drug",
+       y="Drugs") +
+  theme_pubclean()
+
+p_2 <- filter(plot_data, Status=="Treated") %>%
+  group_by(Treatment) %>%
+  summarise(Prop=mean(ResponseBin),
+            BestAvgResponse=median(BestAvgResponse)) %>%
+  ggplot(aes(y=reorder(Treatment, BestAvgResponse),
+                     x=Prop)) +
+  geom_bar(stat="identity") +
+  labs(x="Prop. of responders") +
+  theme_pubclean() +
+  theme(axis.text.y = element_blank(),
+        axis.title.y = element_blank())
+
+p_1 + p_2 +
+  plot_layout(widths = c(2, 1)) +
+  plot_annotation(title = "Sensitivities for all tested drugs",
+                  theme = theme(plot.title = element_text(hjust=0.5)))
+```
+
+Drug combinations are highly represented in the most effective drugs. All in all, there is a good "overlap" between drugs effects distribution: we do not observe completely distinct distributions with some drugs being systematically more efficient than others for all PDX models.
+
+Can we go even further and say that all drugs have at least a few patients for whom they prove to be the best?
+
+```{r best_drug, echo=FALSE, message=FALSE, warning=FALSE}
+
+plot_data <- group_by(PDX_clin, PATIENT_ID) %>%
+  summarise(BestAvgResponse=min(BestAvgResponse, na.rm=T)) %>%
+  left_join(PDX_clin,
+            by=c("PATIENT_ID", "BestAvgResponse")) %>%
+  select(Treatment) %>%
+  table %>% sort %>%
+  as.data.frame %>%
+  rename(Treatment='.')
+
+ggplot(plot_data, aes(y=Treatment, x=Freq)) +
+  geom_barh(stat = "identity") +
+  labs(title = "Best treatments per patient",
+       x="Number of patients for whom the treatment is most effective") +
+  theme_pubclean() +
+  theme(panel.grid.major.y = element_blank())
+
+```
+
+Not exactly. Some drugs (and especially combinations) win the gold medal more often but still the landscape is quite diverse and there is no panacea! It supports the fact that the best strategy is not to treat all patients with the same drugs but rather to adapt drugs to patients therefore supporting a precision medicine approach.
+
+# Causality and PDX for precision medicine
+
+## Define treatment strategy and patient profiles
+
+Let's now define our precision medicine treatment strategy, PM1:
+
+* *PM1*, based on mutation biomarkers
+    + For mutations in PIK3CA --> BYL719, a PI3KCA inhibitor
+    + For mutations in KRAS/BRAF --> binimetinib, a MAPK inhibitor
+    
+PTEN is also included in the genomic covariates of the model since it has been identified as a relevant predictor. LEE011 drug is considered as our standard non-targeted drug.
+
+```{r patient_profiles, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+#PM1
+PM_genes <- c("PIK3CA","KRAS", "PTEN", "BRAF")
+PM_drugs <- c("BYL719", "binimetinib")
+list_tissues <- c("GC", "CRC", "PDAC", "BRCA", "NSCLC", "CM")
+
+PDX_PM <- filter(PDX_mut,
+                     Gene %in% PM_genes) %>%
+  select(-Entrez, -Details, -Label) %>% 
+  mutate(Category=1) %>%
+  distinct %>%
+  spread(key="Gene", value="Category", fill=0) %>%
+  mutate(K_PM=if_else(PIK3CA==1, "BYL719", NA_character_)) %>%
+  mutate(K_PM=if_else(is.na(K_PM) & (KRAS==1 | BRAF==1), "binimetinib", K_PM)) %>%
+  add_row(PATIENT_ID=setdiff(unique(PDX_mut$PATIENT_ID), .$PATIENT_ID),
+                      PIK3CA=0, KRAS=0, K_PM=NA_character_)
+
+```
+
+## Data description
+
+Now we will study the clincal impact of our PM algorithm on PDX models. To do this we focus the analysis on models eligible to this PM algorithm (i.e. mutated for BRAF/KRAS or PIK3CA) and with full data availibility (i.e. responses for binimetinib, BYL719 and LEE011 drugs).
+
+```{r PM1_preprocess, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+
+data_PM <- left_join(PDX_PM,
+                      select(PDX_clin, PATIENT_ID, Tissue, Treatment,
+                             BestAvgResponse) %>%
+                        filter(Treatment %in% c("LEE011", PM_drugs)),
+                      by="PATIENT_ID") %>%
+  filter(!is.na(BestAvgResponse)) %>%
+  pivot_wider(names_from=Treatment, values_from=BestAvgResponse, names_prefix = "Y_") %>%
+  mutate(Y_PM=mapply(function(x,y) if (is.na(y)) {NA_real_}
+                         else {
+                           .[x,paste0("Y_", y)]
+                           }, 1:nrow(.), .$K_PM) %>% unlist,
+         Y_Random=select(., one_of(paste0("Y_", PM_drugs))) %>% rowMeans) %>%
+  filter(!is.na(Y_PM),
+         !is.na(Y_LEE011), !is.na(Y_Random)) %>%
+  mutate(K_PM=factor(K_PM, levels = c("LEE011", PM_drugs)),
+         Tissue=factor(Tissue, levels=list_tissues))
+
+patients_PM <- data_PM$PATIENT_ID
+
+```
+
+This reduced cohort contains `r length(patients_PM)` patients. We plot below the distribution of tissues and biomarkers.
+
+```{r PM1_tissues, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+
+p_hist <- ggplot(data_PM, aes(x=Tissue, fill=Tissue)) +
+  geom_histogram(stat="count") +
+  scale_fill_manual(values=colors_tissues) +
+  theme_pubclean() +
+  guides(fill=FALSE) +
+  labs(title="Number of models") +
+  coord_flip()
+
+prop_mut_tissue <- function(gene, input_data=data_PM, leg=FALSE){
+  p <- input_data %>% rename(Gene=!!gene) %>%
+  group_by(Tissue) %>%
+  summarise(P_1=mean(Gene) %>% round(digits=2),
+            P_0=1-P_1,
+            Label_1=paste0(sum(Gene),"/", n()),
+            Label_0=paste0((n()-sum(Gene)),"/", n())) %>%
+  pivot_longer(cols = starts_with("P_"), values_to="Prop", names_to="Status") %>%
+  mutate(Status=substr(Status, 3,3) %>% factor(levels=c("1", "0"))) %>%
+  arrange(Tissue, Status) %>%
+  mutate(ymin=if_else(Status=="1", 0, 1-Prop),
+         ymax=if_else(Status=="1", Prop, 1),
+         Label=if_else(Status=="1", Label_1, Label_0),
+         LabelAll=paste0(100*Prop, "%\n(", Label, ")"),
+         labelPosition=(ymin+ymax)/2,
+         Tissue=factor(Tissue, levels=rev(list_tissues))) %>%
+  ggplot(aes(ymax=ymax, ymin=ymin, xmax=4, xmin=3, alpha=Status, fill=Tissue)) +
+  geom_rect() +
+  coord_polar(theta="y") +
+  geom_text( x=3.5, aes(y=labelPosition, label=LabelAll), size=3) +
+  facet_grid(Tissue~.) +
+  scale_fill_manual(values=colors_tissues) +
+  scale_alpha_manual(values=c("1"=1, "0"=0.5)) +
+  xlim(c(2, 4)) + ylim(c(0,1)) +
+  theme_void() +
+  theme(strip.text = element_blank(),title = element_text(hjust = 0.5)) +
+  guides(fill=FALSE) +
+  labs(title=paste0(gene, " mut."))
+  
+  if (leg){
+    p
+  } else {
+    p + guides(alpha=FALSE)
+  }
+}
+
+p_prop1 <- prop_mut_tissue("PIK3CA", data_PM)
+#p_prop2 <- prop_mut_tissue("KRAS", data_PM, leg = T)
+p_prop2 <- prop_mut_tissue("KRAS/BRAF",
+                           mutate(data_PM, `KRAS/BRAF`=if_else(BRAF==0 & KRAS==0,
+                                                               0, 1)),
+                           leg = T)
+
+p <- egg::ggarrange(p_hist, p_prop1, p_prop2, nrow = 1, widths = c(3, 1, 1))
+
+#ggsave("PDX_distrib.png", p, width=10, height=4)
+```
+
+## Check algorithm relevance
+
+### Influence of biomarkers
+
+Let's first check whether the algorithm has been designed in a meaningful way, consistent with the data.
+
+```{r PM1_check, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+
+PDX_clin_red <- select(PDX_clin, PATIENT_ID, Tissue, Treatment,
+                       BestAvgResponse, ResponseBin) %>%
+  filter(Treatment %in% c("LEE011", PM_drugs), PATIENT_ID %in% data_PM$PATIENT_ID)
+
+plot_data <- left_join(PDX_clin_red,
+                       mutate(data_PM,
+                              `BRAF/KRAS`=if_else(BRAF==0 & KRAS==0, 0, 1)) %>%
+                         select(PATIENT_ID, `BRAF/KRAS`, PIK3CA),
+                       by="PATIENT_ID") %>%
+  pivot_longer(cols=c('BRAF/KRAS', 'PIK3CA'),
+               names_to = "Gene", values_to="Status") %>%
+  filter(Treatment %in% PM_drugs) %>%
+  mutate(Status=as.factor(Status))
+
+p_cont <- filter(plot_data, !is.na(Treatment), !is.na(Status)) %>%
+  ggplot(aes(x=Status, y=BestAvgResponse)) +
+  geom_boxplot() +
+  facet_grid(Gene~Treatment, scales = "free") +
+  stat_compare_means(paired = FALSE,
+                     label.y.npc = 0.7,label.sep = "\n",label.x.npc = 0.35) +
+  theme_pubclean() +
+  labs(title = "BestAvgResponse metric and biomarkers",
+       x="Mutational status")
+
+p_bin <- filter(plot_data, !is.na(Treatment), !is.na(Status)) %>%
+  select(Treatment, Gene, Status, ResponseBin) %>%
+  ggplot(aes(x=Status, y=ResponseBin)) +
+  geom_bar(stat = "summary", fun = "mean") +
+  facet_grid(Gene~Treatment, scales = "free") +
+  theme_pubclean() +
+  labs(title = "Binary response metric and biomarkers",
+       y="Prop. of responders",
+       x="Mutational status") +
+  ylim(c(0, 1))
+
+p <- (p_cont | p_bin) +
+  plot_annotation(tag_levels = 'A')
+plot(p)
+
+#ggsave("PDX_sensitivities.png", p, width=12, height=4)
+```
+
+Treatment assignment algorithm and observed drug sensitivities are consistent since mutated BRAF/KRAS tumours have a better binimetinib response and mutated PIK3CA tumours have a better BYL719 response. In addition, it can be noted that these biomarkers have deleterious cross-effects.
+
+### Counterfactual responses
+
+We can also have a look at some treatment strategies variables in order to observe the agregated picture
+
+```{r PM1_globalviz, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+colors_ktype <- c("Y_k0"="#48211AFF",
+                  "Y_PM"="#556246FF",
+                  "Y_Random"="#CCAF69FF",
+                  "Y_ki"="#376597FF")
+
+plot_data <- pivot_longer(data_PM, names_to = "K", values_to = "Y", starts_with("Y_")) %>%
+  mutate(K=substr(K, 3, 100)) %>%
+  mutate(K_Type=case_when(
+    K=="LEE011" ~ "Y_k0",
+    K=="PM" ~ "Y_PM",
+    K=="Random" ~ "Y_Random",
+    TRUE ~ "Y_ki"
+  ))
+
+ggplot(plot_data) +
+  geom_boxplot(aes(x=K, y=Y, fill=K_Type)) +
+  facet_grid(~K_Type, scales = "free", space = "free") +
+  scale_fill_manual(values=colors_ktype) +
+  theme_pubclean() +
+  labs(x="Treatment strategy (K)",
+       y="Outcome (Y)") +
+  guides(fill=FALSE)
+
+```
+
+## Analysis with random cohorts
+
+We sample 1000 cohorts of 70 patients (out of `r length(patients_PM)`) and randomly assigned observed treatments for each patient. Then we compute the different estimates for all cohorts.
+
+```{r PM1_random, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+
+n_cohorts <- 1000
+s_cohorts <- 70
+
+true_effects <- function(df){
+    df %<>% filter(!is.na(Y_PM)) %>%
+      mutate(CE1=Y_PM-Y_LEE011,
+             CE2=Y_PM-Y,
+             CE3=Y_PM-Y_Random)
+    
+    res <- data.frame(
+      CE1=mean(df$CE1),
+      CE2=mean(filter(df, A==1)$CE2),
+      CE3=mean(df$CE3)
+    )
+    
+    return(res)
+}
+
+predict.rfsrc.adapt <- function(rf_model, rf_data=NULL){
+
+  if (rf_model$family=="regr"){
+    if (!missing(rf_data)){pred <- predict.rfsrc(rf_model, as.data.frame(rf_data))$predicted}
+    else {pred <- rf_model$predicted}
+  } else if (rf_model$family=="class"){
+    if (all((rf_model$yvar %>% levels) %in% c("0", "1"))){
+      if (!missing(rf_data)){pred <- predict.rfsrc(rf_model, as.data.frame(rf_data))$predicted[,2]}
+      else {pred <- rf_model$predicted[,2]}
+    } else {
+      if (!missing(rf_data)){pred <- predict.rfsrc(rf_model, as.data.frame(rf_data))$predicted}
+      else {pred <- rf_model$predicted}
+      return(pred)
+    }
+  }
+  return(as.vector(pred))
+}
+
+compute_estimates <- function(df=data_PM,
+                              number_cohorts=n_cohorts,
+                              size_cohorts = s_cohorts,
+                              bin=FALSE,
+                              random=TRUE){
+  
+  if (bin){
+    fam <- binomial(link = "logit")
+  } else{
+    fam <- gaussian
+  }
+
+#Define output object
+res <- data.frame(Cohort=1:number_cohorts,
+                    CE1_True=NA_real_, CE1_Naive=NA_real_,
+                    CE1_Std=NA_real_, CE1_IPW=NA_real_, CE1_TMLE=NA_real_,
+                    CE2_True=NA_real_, CE2_Naive=NA_real_,
+                    CE2_Std=NA_real_, CE2_IPW=NA_real_, CE2_TMLE=NA_real_,
+                    CE3_True=NA_real_, CE3_Naive=NA_real_,
+                    CE3_Std=NA_real_, CE3_IPW=NA_real_, CE3_TMLE=NA_real_
+                    )
+
+for (g in PM_genes){
+  res[,paste0("Prop_CE", 1:3, "_", g)] <- NA_real_
+  res[,paste0("Diff_CE", 1:3, "_", g)] <- NA_real_
+}
+
+for (t in PM_drugs){
+  res[,paste0("Prop_CE", 1:3, "_", t)] <- NA_real_
+  res[,paste0("Diff_CE", 1:3, "_", t)] <- NA_real_
+}
+
+
+#COHORTS: define the sampling sub-cohorts
+set.seed(1)
+selected_patients <- replicate(number_cohorts,
+                               sample(df$PATIENT_ID,
+                                      size_cohorts,
+                                      replace = F))
+
+if (random){
+  observed_treatments <- replicate(number_cohorts,
+                                   sample(c("LEE011", PM_drugs),
+                                          size_cohorts,
+                                          replace = T,
+                                          prob = rep(1/(length(PM_drugs)+1), length(PM_drugs)+1)),
+                                   simplify = T)
+} else {
+  df_red <- select(df, PATIENT_ID, any_of(PM_genes)) %>% column_to_rownames(var="PATIENT_ID")
+  informed_treatment <- function(pat){
+    trt <- sample(c("LEE011", "binimetinib", "BYL719"), 1,
+                  prob = c(1, #+ 2*df_red[pat, "PTEN"],
+                           1 + 1*max(df_red[pat, "KRAS"], df_red[pat, "BRAF"]),
+                           #1,# + 2*df_red[pat, "KRAS"],
+                           1 + 1*df_red[pat, "PIK3CA"]
+                           ))
+    return(trt)
+  }
+
+  observed_treatments <- selected_patients
+  for (r in 1:nrow(observed_treatments)){
+    for (c in 1:ncol(observed_treatments)){
+      observed_treatments[r, c] <- informed_treatment(observed_treatments[r, c])
+    }
+  }
+
+  # observed_treatments <- replicate(number_cohorts,
+  #                                  sample(c("LEE011", "binimetinib", "BYL719"),
+  #                                         size_cohorts,
+  #                                         replace = T,
+  #                                         prob = c(0.25, 0.50, 0.25)),
+  #                                  simplify = T)
+}
+
+
+#LOOP: compute all subcohorts causal effects and compositions
+pb = txtProgressBar(min = 1, max = number_cohorts) 
+
+for (i in 1:number_cohorts){
+  setTxtProgressBar(pb,i)
+
+  cohort_i <- filter(df, PATIENT_ID %in% selected_patients[,i]) %>%
+    mutate(K=observed_treatments[,i] %>% factor(levels=c("LEE011", PM_drugs))) %>%
+    mutate(Y=mapply(function(x,y) if (is.na(y)) {NA_real_}
+                    else {
+                      .[x, paste0("Y_", y)]
+                      },
+                    1:nrow(.), .$K) %>% unlist,
+           PM=if_else(K_PM==K, 1, 0),
+           A=if_else(K=="LEE011", 0, 1))
+  
+  #SUBCOHORT COMPOSITION: Compute compositions (in C_i and k_i) of subcohorts o later analyse potential biases
+  #First for CE1 cohorts
+  res[i, paste0("Prop_CE1_", PM_genes)] <- filter(cohort_i, PM==1 | A==0) %>% select(one_of(PM_genes)) %>% colMeans
+  res[i, paste0("Prop_CE1_", PM_drugs)] <- filter(cohort_i, PM==1 | A==0) %>% group_by(K_PM, .drop=FALSE) %>%
+    summarise(prop=n()/nrow(.)) %>% filter(K_PM!="LEE011") %>% .$prop
+  res[i, paste0("Diff_CE1_", PM_genes)] <- (filter(cohort_i, PM==1) %>% select(one_of(PM_genes)) %>% colMeans) - (filter(cohort_i, A==0) %>% select(one_of(PM_genes)) %>% colMeans)
+  res[i, paste0("Diff_CE1_", PM_drugs)] <- (filter(cohort_i, PM==1) %>% group_by(K_PM, .drop=FALSE) %>% summarise(prop=n()/nrow(.)) %>% filter(K_PM!="LEE011") %>% .$prop) -
+    (filter(cohort_i, A==0) %>% group_by(K_PM, .drop=FALSE) %>% summarise(prop=n()/nrow(.)) %>% filter(K_PM!="LEE011") %>% .$prop)
+  
+  #Then for CE2 cohorts
+  res[i, paste0("Prop_CE2_", PM_genes)] <- filter(cohort_i, PM==1 | A==1) %>% select(one_of(PM_genes)) %>% colMeans
+  res[i, paste0("Prop_CE2_", PM_drugs)] <- filter(cohort_i, PM==1 | A==1) %>% group_by(K_PM, .drop=FALSE) %>%
+    summarise(prop=n()/nrow(.)) %>% filter(K_PM!="LEE011") %>% .$prop
+  res[i, paste0("Diff_CE2_", PM_genes)] <- (filter(cohort_i, PM==1) %>% select(one_of(PM_genes)) %>% colMeans) - (filter(cohort_i, A==1) %>% select(one_of(PM_genes)) %>% colMeans)
+  res[i, paste0("Diff_CE2_", PM_drugs)] <- (filter(cohort_i, PM==1) %>% group_by(K_PM, .drop=FALSE) %>% summarise(prop=n()/nrow(.)) %>% filter(K_PM!="LEE011") %>% .$prop) -
+    (filter(cohort_i, A==1) %>% group_by(K_PM, .drop=FALSE) %>% summarise(prop=n()/nrow(.)) %>% filter(K_PM!="LEE011") %>% .$prop)
+  
+  #First for CE3 cohorts
+  res[i, paste0("Prop_CE3_", PM_genes)] <- res[i, paste0("Prop_CE2_", PM_genes)]
+  res[i, paste0("Prop_CE3_", PM_drugs)] <- res[i, paste0("Prop_CE2_", PM_drugs)]
+  res[i, paste0("Diff_CE3_", PM_genes)] <-res[i, paste0("Diff_CE2_", PM_genes)]
+  res[i, paste0("Diff_CE3_", PM_drugs)] <- res[i, paste0("Diff_CE2_", PM_drugs)]
+  
+  #TRUE EFFECTS: Compute the true effects in the subcohort using counterfactual data
+  res[i, paste0("CE", 1:3, "_True")] <- true_effects(cohort_i)
+  
+  #NAIVE EFFECTS: Compute the naive effects in the subcohort using only observed data
+  res[i, "CE1_Naive"] <- mean(filter(cohort_i, PM==1)$Y) - mean(filter(cohort_i, A==0)$Y)
+  res[i, "CE2_Naive"] <- mean(filter(cohort_i, PM==1)$Y) - mean(filter(cohort_i, A==1)$Y)
+  res[i, "CE3_Naive"] <- mean(filter(cohort_i, PM==1)$Y) -
+    filter(cohort_i, A==1) %>% group_by(K) %>% summarise(Mean=mean(Y)) %>% .$Mean %>% mean
+  
+  #COUNTERFACTUALS: estimate the counterfactual variables for later use in quantification of causal effects
+  #Y_1_KPM: estimate the counterfactual outcome corresponding to all patients treated according to PM algorithm (used in CE1, CE2 and CE3)
+  cohort_i_std <- mutate(cohort_i, K_1KPM=K)
+  
+  if (bin==TRUE){
+    cohort_i_std %<>% mutate(Y=as.factor(Y))
+  }
+  
+  std1 <- rfsrc(as.formula(paste0("Y ~ K_1KPM + ",
+                                    paste0(PM_genes, collapse = "+"),
+                                    "")),
+                  #Y ~ K_1KPM*(C_1 + C_2 + C_3),
+                  data = as.data.frame(cohort_i_std))
+  
+  cohort_i_std %<>% mutate(K_1KPM=K_PM) %>%
+      mutate(Y_1KPM=predict.rfsrc.adapt(std1, .))
+  
+  #Y_1_k1, Y_1_k2 and Y_1_k3: estimate the counterfactual outcome corresponding to all patients treated with k1/k2/k3
+  for (t in PM_drugs){
+    cohort_i_std[,paste0("Y_1_", t)] <- predict.rfsrc.adapt(std1, mutate(cohort_i_std, K_1KPM=t %>% factor(levels=c("LEE011", PM_drugs))))
+  }
+  
+
+  #Y_1_krand: estimate the counterfactual outcome corresponding to all patients treated with random treatment among k1/k2/k3 (for CE3)
+  cohort_i_std[,"Y_1_krand"] <- cohort_i_std[, paste0("Y_1_", PM_drugs)] %>% rowMeans
+
+  #Y_0_k0: estimate the counterfactual outcome corresponding to all patients left untreated (for CE1)
+  cohort_i_std %<>% mutate(A_01=A)
+  std2 <- rfsrc(as.formula(paste0("Y ~ A_01 + ",
+                                  paste0(PM_genes, collapse = "+"),
+                                  "")),
+                  #Y ~ A_01*(C_1 + C_2 + C_3),
+                data = as.data.frame(cohort_i_std))
+  
+  cohort_i_std %<>% mutate(A_01=0) %>%
+          mutate(Y_0_k0=predict.rfsrc.adapt(std2, .))
+  
+  #Y_1_K: estimate the counterfactual outcome corresponding to all patients treated with physician's treatment (for CE2)
+  cohort_i_std %<>% mutate(A_01=1) %>%
+      mutate(Y_1_K=predict.rfsrc.adapt(std2, .))
+      
+  #CAUSAL EFFECTS: estimate the causal effects
+  res[i, "CE1_Std"] <- mean(cohort_i_std$Y_1KPM)-mean(cohort_i_std$Y_0_k0)
+  res[i, "CE2_Std"] <- mean(cohort_i_std$Y_1KPM)-mean(cohort_i_std$Y_1_K)
+  res[i, "CE3_Std"] <- mean(cohort_i_std$Y_1KPM)-mean(cohort_i_std$Y_1_krand)
+  
+  #IPW ESTIMATES: fit treatment models
+  #Fit IPW models for CE1 and CE2
+  #Weights for PM=1 arm
+  cohort_i_ipw <- cohort_i
+  
+  #Weights for A=0 arm
+  ipw_A_denom <- rfsrc(as.formula(paste0("A ~ ",
+                                        paste0(PM_genes, collapse = "+"))),
+                       data = mutate(cohort_i_ipw, A=as.factor(A)) %>% as.data.frame) %>% .$predicted %>% .[,2]
+  
+  
+  ipw_A_nom <- mean(cohort_i_ipw$A)
+  
+  cohort_i_ipw %<>% mutate(SW_A=if_else(A==1, ipw_A_nom/ipw_A_denom, 
+                                         (1-ipw_A_nom)/(1-ipw_A_denom)),
+                           W_A=if_else(A==1, 1/ipw_A_denom, 1/(1-ipw_A_denom)))
+  
+  #Fit IPW models for CE3
+  ipw_K_denom <- rfsrc(as.formula(paste0("K ~ ", paste0(PM_genes, collapse = "+"))),
+                       data = as.data.frame(cohort_i_ipw)) %>%
+    .$predicted
+  
+  ipw_K_num <- multinom(K~1,
+                        data = cohort_i_ipw, trace=FALSE) %>%
+    predict(type="probs")
+  
+  for (t in PM_drugs){
+    cohort_i_ipw %<>% mutate(UQ(paste0("SW_", t)) := unname(ipw_K_num[,t])/unname(ipw_K_denom[,t]),
+                             UQ(paste0("W_", t)) := 1/unname(ipw_K_denom[,t]))
+  }
+  Y_IPW_rand <- sapply(PM_drugs,
+                       function(x) mean(unlist((cohort_i_ipw$K==x)*cohort_i_ipw[,paste0("SW_", x)]*cohort_i_ipw$Y)) /
+                         mean(unlist((cohort_i_ipw$K==x)*cohort_i_ipw[,paste0("SW_", x)])))
+  
+  #Test for versions
+  cohort_i_ipw %<>% mutate(SW_PM=mapply(function(x,y) if (is.na(y)) {NA_real_}
+                                         else {
+                                           unname(.[x, paste0("SW_", y)])
+                                           },
+                                         1:nrow(.), .$K_PM) %>% unlist,
+                           W_PM=mapply(function(x,y) if (is.na(y)) {NA_real_}
+                                         else {
+                                           unname(.[x, paste0("W_", y)])
+                                           },
+                                         1:nrow(.), .$K_PM) %>% unlist)
+  
+   #Write causal effects
+  t_PM <- mean(with(cohort_i_ipw, PM*SW_PM*Y)) / mean(with(cohort_i_ipw, PM*SW_PM))
+  res[i, "CE1_IPW"] <- t_PM - (mean(with(cohort_i_ipw, (1-A)*SW_A*Y)) / mean(with(cohort_i_ipw, (1-A)*SW_A)))
+  res[i, "CE2_IPW"] <- t_PM - (mean(with(cohort_i_ipw, A*SW_A*Y)) / mean(with(cohort_i_ipw, A*SW_A)))
+  res[i, "CE3_IPW"] <- t_PM - mean(Y_IPW_rand)
+  
+  #TMLE ESTIMATE WITH RF
+  #First compute the Q0 model based on K
+  
+  try({
+  cohort_i_tmle <- mutate(cohort_i, K_1KPM=K)
+  if (bin==TRUE){
+    cohort_i_tmle %<>% mutate(Y=as.factor(Y))
+  }
+    
+  tl_glm1 <- rfsrc(as.formula(paste0("Y ~ K_1KPM + ",
+                                   paste0(PM_genes, collapse = "+"))),
+                 data = as.data.frame(cohort_i_tmle)#, %>% filter(K_1KPM!="LEE011"),
+                 )
+    
+  cohort_i_tmle %<>% mutate(K_1KPM=K_PM) %>%
+    mutate(Q0_KPM=predict.rfsrc.adapt(tl_glm1, .),
+           Q0_K=predict.rfsrc.adapt(tl_glm1))
+      
+  for (t in PM_drugs){
+    cohort_i_tmle[,paste0("Q0_K", t)] <- predict.rfsrc.adapt(tl_glm1, mutate(cohort_i_tmle, K_1KPM=factor(t, levels = c("LEE011", PM_drugs))))
+    }
+
+  #And based on A
+  cohort_i_tmle %<>% mutate(A_01=A)
+  tl_glm2 <- rfsrc(as.formula(paste0("Y ~ A_01 + ",
+                                   paste0(PM_genes, collapse = "+"))),
+                 data = as.data.frame(cohort_i_tmle))
+  cohort_i_tmle %<>% mutate(A_01=0) %>%
+    mutate(Q0_A0=predict.rfsrc.adapt(tl_glm2, .),
+           Q0_A=predict.rfsrc.adapt(tl_glm2)) %>%
+    mutate(A_01=1) %>%
+    mutate(Q0_A1=predict.rfsrc.adapt(tl_glm2, .))
+    
+  #Compute propensity scores
+  prop_A <- rfsrc(as.formula(paste0("A ~ ",
+                                  paste0(PM_genes, collapse = "+"))),
+                data = mutate(cohort_i_tmle, A=factor(A)) %>% as.data.frame) %>%
+    predict.rfsrc.adapt
+  cohort_i_tmle %<>% mutate(gA=if_else(A==1, prop_A, 1-prop_A))
+    
+  prop_K <- rfsrc(as.formula(paste0("K ~ ",
+                                       paste0(PM_genes, collapse = "+"))),
+                     data = as.data.frame(cohort_i_tmle)) %>%
+    predict.rfsrc.adapt
+    
+  for (t in PM_drugs){
+    cohort_i_tmle %<>% mutate(UQ(paste0("gK_", t)) := unname(prop_K[,t]))
+  }
+  
+  cohort_i_tmle %<>% mutate(gKPM=mapply(function(x,y) if (is.na(y)) {NA_real_}
+                                        else {
+                                          unname(.[x, paste0("gK_", y)])
+                                          },
+                                        1:nrow(.), .$K_PM) %>% unlist)
+    
+  #CE1 estimation
+  cohort_i_tmle_CE1 <- mutate(cohort_i_tmle,
+                              CE1=if_else(A==0, 0, if_else(PM==1, 1, NA_real_))) %>%
+    filter(!is.na(CE1)) %>%
+    mutate(H1=if_else(CE1==1, 1/gKPM, 0),
+           H0=if_else(CE1==0, 1/(1-gA), 0))
+    
+  if (bin==FALSE){
+    fit <- glm(Y ~ -1 + H0 + H1 + offset(Q0_K),
+               data = cohort_i_tmle_CE1,
+               family = fam) %>%
+      coef
+    
+    cohort_i_tmle_CE1 %<>% mutate(Q1_A0=Q0_A0+fit[1]*H0,
+                                  Q1_KPM=Q0_KPM+fit[2]*H1)
+    } else {
+      fit <- glm(Y ~ -1 + H0 + H1 + offset(qlogis(Q0_K)),
+                 data = cohort_i_tmle_CE1,
+                 family = fam) %>%
+        coef
+      cohort_i_tmle_CE1 %<>% mutate(Q1_A0=plogis(qlogis(Q0_A0)+fit[1]*H0),
+                                    Q1_KPM=plogis(qlogis(Q0_KPM)+fit[2]*H1))
+    }
+  
+    
+    res[i, "CE1_TMLE"] <- with(cohort_i_tmle_CE1, mean(Q1_KPM-Q1_A0))
+    
+    #CE2 estimation
+    cohort_i_tmle_CE2 <- bind_rows(filter(cohort_i_tmle, PM==1) %>% mutate(CE2=1),
+                                   filter(cohort_i_tmle, A==1) %>% mutate(CE2=0)) %>%
+      mutate(H1=if_else(CE2==1, 1/gKPM, 0),
+             H0=if_else(CE2==0, 1/(gA), 0))
+    
+    if (bin==FALSE){
+      fit <- glm(Y ~ -1 + H0 + H1 + offset(Q0_K),
+                 data = cohort_i_tmle_CE2,
+                 family = fam) %>%
+        coef
+    
+    cohort_i_tmle_CE2 %<>% mutate(Q1_A1=Q0_A1+fit[1]*H0,
+                             Q1_KPM=Q0_KPM+fit[2]*H1)
+    } else {
+      fit <- glm(Y ~ -1 + H0 + H1 + offset(qlogis(Q0_K)),
+                 data = cohort_i_tmle_CE2,
+                 family = fam) %>%
+        coef
+      cohort_i_tmle_CE2 %<>% mutate(Q1_A1=plogis(qlogis(Q0_A1)+fit[1]*H0),
+                                    Q1_KPM=plogis(qlogis(Q0_KPM)+fit[2]*H1))
+    }
+    
+    res[i, "CE2_TMLE"] <- with(cohort_i_tmle_CE2, mean(Q1_KPM-Q1_A1))
+    
+    #CE3 estimation
+    cohort_i_tmle_CE3 <- bind_rows(filter(cohort_i_tmle, PM==1) %>% mutate(CE3=1),
+                                   filter(cohort_i_tmle, A==1) %>% mutate(CE3=0)) %>%
+      mutate(H1=if_else(CE3==1, 1/gKPM, 0))
+    
+    for (t in PM_drugs){
+      cohort_i_tmle_CE3[,paste0("H0_", t)] <- if_else(cohort_i_tmle_CE3$K==t,
+                                                      unlist(1/cohort_i_tmle_CE3[,paste0("gK_", t)]), 0)
+    
+      if (bin==FALSE){
+        fit <- glm(as.formula(paste0("Y ~ -1 + H0_", t," + H1 + offset(Q0_K)")),
+                   data = cohort_i_tmle_CE3,
+                   family = fam) %>%
+          coef
+      
+        cohort_i_tmle_CE3[,paste0("Q1_K", t)] <-
+          cohort_i_tmle_CE3[,paste0("Q0_K", t)]+fit[1]*cohort_i_tmle_CE3[,paste0("H0_", t)]
+        cohort_i_tmle_CE3[,paste0("Q1_KPM", t)] <-
+          cohort_i_tmle_CE3[,"Q0_KPM"]+fit[2]*cohort_i_tmle_CE3[,"H1"]
+
+        } else {
+          fit <- glm(as.formula(paste0("Y ~ -1 + H0_", t," + H1 + offset(qlogis(Q0_K))")),
+                     data = cohort_i_tmle_CE3,
+                     family = fam) %>%
+            coef
+        
+          cohort_i_tmle_CE3[,paste0("Q1_K", t)] <-
+            plogis(unlist(qlogis(unlist(cohort_i_tmle_CE3[,paste0("Q0_K",t)]))+fit[1]*cohort_i_tmle_CE3[,paste0("H0_", t)]))
+          cohort_i_tmle_CE3[,paste0("Q1_KPM", t)] <-
+            plogis(unlist(qlogis(unlist(cohort_i_tmle_CE3[,"Q0_KPM"]))+fit[2]*cohort_i_tmle_CE3[,"H1"]))
+      
+      }
+      
+      cohort_i_tmle_CE3[, paste0("CE3_", t)] <- cohort_i_tmle_CE3[, paste0("Q1_KPM", t)]-
+        cohort_i_tmle_CE3[, paste0("Q1_K", t)]
+      
+    }
+    
+    res[i, "CE3_TMLE"] <- colMeans(select(cohort_i_tmle_CE3, starts_with("CE3_"))) %>% mean
+    
+    })
+
+}
+
+return(res)
+
+}
+
+res_PM <- compute_estimates(data_PM)
+
+print("Computation of estimates done")
+```
+
+## Summary plots
+
+```{r PM1_plots_functions, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+colors_methods <- c("True"= "#376597FF", "Std"="#928F6BFF", "IPW"="#CCAF69FF", "TMLE"="#556246FF", "Naive"="#8F5144FF")
+
+estimates_plot <- function(input_data, CEi="CE1"){
+
+   plot_data <- select(input_data, Cohort, starts_with(CEi)) %>%
+      rename_all(funs(str_replace(., paste0(CEi,"_"), "")))
+    
+  #Distributions of CE1 estimates
+  p_distrib <-  pivot_longer(plot_data, any_of(c("True", "Naive", "Std", "IPW", "TMLE")),
+                               names_to = "Method", values_to = "Estimate") %>%
+      mutate(Method=factor(Method,
+                           levels=c("True", "TMLE", "Std", "IPW", "Naive"))) %>%
+      ggplot(aes(x=Method, y=Estimate, fill=Method)) +
+      geom_boxplot(alpha=1, show.legend = FALSE, varwidth = FALSE, width=0.4) +
+      geom_text(data = . %>% filter(!is.nan(Estimate)) %>% group_by(Method) %>%
+                  summarise(N=paste0("n=",n()), Min=min(Estimate), Max=max(Estimate)) %>%
+                  mutate(Estimate=min(Min)-0.05*(max(Max)-min(Min))),
+                aes(x=Method, label=N), size=3) +
+      scale_fill_manual(values=colors_methods) +
+      #geom_hline(aes(linetype="True effect in super-population",
+      #               yintercept = TE)) +
+      #scale_linetype_manual(name="Reference",
+      #                      values=c("True effect in super-population"="dashed")) +
+      labs(title=paste0(CEi," distribution and methods")) +
+      theme_pubclean() +
+      theme(#plot.title = element_text(size = 10),
+            legend.position = "bottom",
+            legend.title = element_text(face="bold")#,
+            #legend.text = element_text(size = 8)
+            )
+  
+  p_diff <-pivot_longer(plot_data, any_of(c("Naive", "Std", "IPW", "TMLE")),
+                          names_to = "Method", values_to = "Estimate") %>%
+      mutate(Method=factor(Method, levels=c("TMLE", "Std", "IPW", "Naive")),
+             Diff=Estimate-True) %>%
+      ggplot(aes(x=Method, y=Diff, fill=Method)) +
+      geom_boxplot(alpha=1, show.legend = FALSE, varwidth = FALSE, width=0.4) +
+      #geom_text(data = . %>% filter(!is.nan(Diff)) %>% group_by(Method) %>%
+      #            summarise(N=paste0("n=",n()), Min=min(Diff), Max=max(Diff)) %>%
+      #            mutate(Diff=min(Min)-0.05*(max(Max)-min(Min))),
+      #          aes(x=Method, label=N)) +
+      scale_fill_manual(values=colors_methods) +
+      labs(title=paste0(CEi," deviations from true effects"),
+           y="Deviation value") +
+      theme_pubclean() +
+      theme(#plot.title = element_text(size = 10),
+        legend.position = "bottom",
+        legend.title = element_text(face="bold")#,
+        #legend.text = element_text(size = 8)
+      )
+  
+  #Performances
+    p_perf_plot <-pivot_longer(plot_data, any_of(c("Naive", "Std", "IPW", "TMLE")),
+                          names_to = "Method", values_to = "Estimate") %>%
+      mutate(Method=factor(Method, levels=c("TMLE", "Std", "IPW", "Naive"))) %>%
+      group_by(Method) %>%
+      summarise(RMSE=RMSE(True, Estimate, na.rm=TRUE), MAE=MAE(True, Estimate, na.rm=TRUE))
+
+      p_perf <- mutate(p_perf_plot, Label=as.character(round(MAE, digits=2))) %>%
+        ggplot(aes(x=Method, y=MAE, fill=Method)) +
+        geom_bar(stat = "identity", width=0.5) +
+        geom_text(aes(label=Label, y=0.5*min(MAE)), color="white") +
+        scale_fill_manual(values=colors_methods,guide = guide_legend(direction = "vertical")) +
+        theme_pubclean() +
+        theme(legend.justification = "center",
+              legend.text = element_text(size=8),
+              legend.title = element_text(face="bold", size=10))
+  
+  #Scatter plot for estimates
+    p_scatter <- pivot_longer(plot_data, any_of(c("Naive", "Std", "IPW", "TMLE")),
+                              names_to = "Method", values_to = "Estimate") %>%
+      mutate(Method=factor(Method, levels=c("TMLE", "Std","IPW", "Naive"))) %>%
+      ggplot(aes(x=True, y=Estimate)) +
+      geom_point(aes(color=Method), size=0.6, show.legend = FALSE) +
+      geom_abline(aes(slope = 1, intercept = 0, linetype = "y = x"),
+                  lwd=1,show.legend=TRUE) +
+      geom_smooth(method = "lm", formula =y ~ x, aes(linetype = "y = ax+b"),
+                  color="black",show.legend=FALSE) +
+      stat_cor(aes(label = `..r.label..`), p.digits =1, label.sep = '\n') +
+      facet_grid(.~Method)  +
+      scale_color_manual(values=c(colors_methods)) +
+      scale_linetype_manual(values= c("y = x"="solid", "y = ax+b"="dashed"),
+                            guide = guide_legend(direction = "vertical",
+                                                 override.aes=list(fill=NA))) +
+      labs(title = paste0(CEi," estimates compared to true effects"),
+           x="True estimates",
+           y="Estimates from\nobserved data",
+           linetype="Lines") +
+      theme_pubclean() +
+      theme(#plot.title = element_text(size = 10),
+            #legend.position = "bottom",
+            legend.justification = "center",
+            legend.text = element_text(size=8),
+            legend.title = element_text(face="bold", size=10)
+            #strip.text = element_text(size = 9, face = "bold"),
+            #strip.background = element_rect(color="black")
+            ) +
+      guides(color=FALSE)
+    
+    ((p_distrib / (p_diff + p_perf) / p_scatter) | guide_area()) +
+      plot_layout(guides = 'collect', widths = c(6,1))
+    
+}
+
+plot_CE_summary <- function(input_data){
+  
+  plot_CEx <- function(CEi){
+  val <- gsub("CE", "", CEi)
+  plot_data_CEi <- select(input_data, Cohort, starts_with(CEi)) %>%
+      rename_all(funs(str_replace(., paste0(CEi,"_"), "")))
+  
+  if (CEi=="CE3"){
+  p_distrib <-  pivot_longer(plot_data_CEi, any_of(c("True", "Naive", "Std", "IPW", "TMLE")),
+                               names_to = "Method", values_to = "Estimate") %>%
+      mutate(Method=factor(Method,
+                           levels=c("True", "TMLE", "Std", "IPW", "Naive"))) %>%
+      ggplot(aes(x=Method, y=Estimate, fill=Method)) +
+      geom_boxplot(alpha=1, show.legend = FALSE, varwidth = FALSE, width=0.4) +
+      scale_fill_manual(values=colors_methods) +
+      #geom_hline(aes(linetype="True effect\n in super-\npopulation",
+      #               yintercept = TE)) +
+      #scale_linetype_manual(name="Reference",
+      #                      values=c("True effect\n in super-\npopulation"="dashed"),
+      #                      guide = guide_legend(direction = "vertical")) +
+      labs(title=bquote(CE[.(val)] ~ " distributions")) +
+      theme_pubclean() +
+      theme(plot.title = element_text(size = 10, face = 'bold'),
+            legend.position = "bottom",
+            legend.text = element_text(size=8),
+            legend.title = element_text(face="bold", size=10),
+            legend.justification = "center",
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size=10))
+  } else {
+    p_distrib <-  pivot_longer(plot_data_CEi, any_of(c("True", "Naive", "Std", "IPW", "TMLE")),
+                               names_to = "Method", values_to = "Estimate") %>%
+      mutate(Method=factor(Method,
+                           levels=c("True", "TMLE", "Std", "IPW", "Naive"))) %>%
+      ggplot(aes(x=Method, y=Estimate, fill=Method)) +
+      geom_boxplot(alpha=1, show.legend = FALSE, varwidth = FALSE, width=0.4) +
+      scale_fill_manual(values=colors_methods) +
+      #geom_hline(aes(linetype="True effect in super-population",
+      #               yintercept = TE), show.legend = FALSE) +
+      #scale_linetype_manual(name="Reference",
+      #                      values=c("True effect in super-population"="dashed")) +
+      labs(title=bquote(CE[.(val)] ~ " distributions")) +
+      theme_pubclean() +
+      theme(plot.title = element_text(size = 10, face = 'bold'),
+            axis.title.x = element_blank(),
+            axis.title.y = element_text(size=10))
+  }
+  
+  #Deviations
+  p_diff <-pivot_longer(plot_data_CEi, any_of(c("Naive", "Std", "IPW", "TMLE")),
+                        names_to = "Method", values_to = "Estimate") %>%
+    mutate(Method=factor(Method, levels=c("TMLE", "Std", "IPW", "Naive")),
+           Diff=Estimate-True) %>%
+    ggplot(aes(x=Method, y=Diff, fill=Method)) +
+    geom_boxplot(alpha=1, show.legend = FALSE, varwidth = FALSE, width=0.4) +
+    scale_fill_manual(values=colors_methods) +
+    labs(title=bquote(CE[.(val)] ~ " deviations"),
+         y="Deviation value") +
+    theme_pubclean() +
+    theme(plot.title = element_text(size = 10, face = 'bold'),
+      legend.position = "bottom",
+      legend.title = element_text(face="bold"),
+      axis.title.x = element_blank(),
+       axis.title.y = element_text(size=10)
+    )
+  
+  #Performances
+    p_perf_plot <-pivot_longer(plot_data_CEi, any_of(c("Naive", "Std", "IPW", "TMLE")),
+                          names_to = "Method", values_to = "Estimate") %>%
+      mutate(Method=factor(Method, levels=c("TMLE", "Std", "IPW", "Naive"))) %>%
+      group_by(Method) %>%
+      summarise(RMSE=RMSE(True, Estimate, na.rm=TRUE), MAE=MAE(True, Estimate, na.rm=TRUE))
+    
+      p_perf <- mutate(p_perf_plot, Label=as.character(round(MAE, digits=2))) %>%
+        ggplot(aes(x=Method, y=MAE, fill=Method)) +
+        geom_bar(stat = "identity", width=0.8,
+                 show.legend = if_else(CEi=="CE3", TRUE, FALSE)) +
+        geom_text(aes(label=Label, y=0.5*min(MAE)), color="white",
+                  fontface="bold") +
+        scale_fill_manual(values=colors_methods,guide = guide_legend(direction = "vertical")) +
+        labs(title=bquote(CE[.(val)] ~ " deviations scores")) +
+        theme_pubclean() +
+        theme(plot.title = element_text(size = 10, face = 'bold'),
+              legend.justification = "center",
+              legend.text = element_text(size=8),
+              legend.title = element_text(face="bold", size=10),
+              axis.title.x = element_blank(),
+              axis.title.y = element_text(size=10))
+      
+      p <- (p_distrib | p_diff | p_perf) +
+        plot_layout(widths = c(5,4,5))
+      
+      return(p)
+  }
+  
+  p_CE1 <- plot_CEx("CE1")
+  p_CE2 <- plot_CEx("CE2")
+  p_CE3 <- plot_CEx("CE3")
+  
+  ((p_CE1 / p_CE2 / p_CE3) | guide_area()) +
+    plot_layout(widths = c(6,1), guides = 'collect')
+}
+
+```
+
+
+
+```{r PM1_plots, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE, fig.height=5, fig.width=10}
+plot_CE_summary(res_PM)
+
+estimates_plot(res_PM, "CE1")
+estimates_plot(res_PM, "CE2")
+estimates_plot(res_PM, "CE3")
+
+#ggsave(file="PDX_cont.png", plot=plot_CE_summary(res_PM), width=8, height=6)
+```
+
+
+## Analysis with unbalanced cohorts
+
+We sample 1000 cohorts of 70 patients (out of `r length(patients_PM)`) and randomly assigned observed treatments for each patient. Then we compute the different estimates for all cohorts.
+
+
+```{r PM1_unbalanced, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE, fig.height=5, fig.width=10}
+res_PM_unbalanced <- compute_estimates(data_PM, random = FALSE)
+
+plot_CE_summary(res_PM_unbalanced)
+
+estimates_plot(res_PM_unbalanced, "CE1")
+estimates_plot(res_PM_unbalanced, "CE2")
+estimates_plot(res_PM_unbalanced, "CE3")
+```
+
+# Analysis with a discrete outcome
+
+We can reproduce very similar analyses replacing the continuous outcome by a binary one.
+
+```{r PM1_preprocess_bin, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+
+data_PM_bin <- left_join(PDX_PM,
+                      select(PDX_clin, PATIENT_ID, Tissue, Treatment,
+                             ResponseBin) %>%
+                        filter(Treatment %in% c("LEE011", PM_drugs)),
+                      by="PATIENT_ID") %>%
+  filter(!is.na(ResponseBin)) %>%
+  pivot_wider(names_from=Treatment, values_from=ResponseBin, names_prefix = "Y_") %>%
+  mutate(Y_PM=mapply(function(x,y) if (is.na(y)) {NA_real_}
+                         else {
+                           .[x,paste0("Y_", y)]
+                           }, 1:nrow(.), .$K_PM) %>% unlist,
+         Y_Random=select(., one_of(paste0("Y_", PM_drugs))) %>% rowMeans) %>%
+  filter(!is.na(Y_PM), !is.na(Y_LEE011), !is.na(Y_Random)) %>%
+  mutate(K_PM=factor(K_PM, levels = c("LEE011", PM_drugs)),
+         Tissue=factor(Tissue, levels=list_tissues))
+
+```
+
+This reduced cohort still contains `r length(patients_PM)` patients with the same distribution of tissues and mutations
+
+## Counterfactual responses
+
+What is the global landscape of drug sensitivities in this reduced cohort?
+
+```{r PM1_globalviz_bin, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+
+plot_data <- pivot_longer(data_PM_bin,
+                          names_to = "K", values_to = "Y", starts_with("Y_")) %>%
+  group_by(K) %>% summarise(M=mean(Y)) %>%
+  mutate(K=substr(K, 3, 100)) %>%
+  mutate(K_Type=case_when(
+    K=="LEE011" ~ "Y_k0",
+    K=="PM" ~ "Y_PM",
+    K=="Random" ~ "Y_Random",
+    TRUE ~ "Y_ki"
+  )) 
+
+ggplot(plot_data) +
+  geom_bar(aes(x=K, y=M, fill=K_Type), stat = "identity") +
+  facet_grid(~K_Type, scales = "free", space = "free") +
+  scale_fill_manual(values=colors_ktype) +
+  theme_pubclean() +
+  labs(x="Treatment strategy (K)",
+       y="Proportion of responders") +
+  guides(fill=FALSE)
+
+```
+
+
+## Analysis with random cohorts
+
+Similarly, we sample 1000 cohorts of 70 patients (out of `r length(patients_PM)`) and randomly assigned observed treatments for each patient. Then we compute the different estimates for all cohorts.
+
+```{r PM1_random_bin, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
+
+res_PM_bin <- compute_estimates(data_PM_bin, bin=TRUE)
+
+print("Computation of estimates done")
+```
+
+## Summary plots
+
+```{r PM1_plots_bin, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE, fig.height=5, fig.width=10}
+plot_CE_summary(res_PM_bin)
+
+estimates_plot(res_PM_bin, "CE1")
+estimates_plot(res_PM_bin, "CE2")
+estimates_plot(res_PM_bin, "CE3")
+
+t <- cor(select(res_PM_bin, starts_with("CE")), select(res_PM_bin, starts_with(c("Prop", "Diff"))), use = "pairwise.complete.obs")
+corrplot(t)
+
+#ggsave(file="PDX_bin.png", plot=plot_CE_summary(res_PM_bin), width=10, height=6)
+```
+
+
+# Supp
+
+```{r sandbox_RF, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE}
+
+cancer_genes_cosmic <- read_delim("PDX/General/cancer_genes_COSMIC.txt", delim = ',') %>% unlist 
+cancer_genes_HPA <- read_delim("PDX/General/cancer_genes_HPA.txt", delim = ',') %>% unlist 
+cancer_genes <- c(cancer_genes_cosmic, cancer_genes_HPA) %>% unique
+
+PDX_mut_test <- filter(PDX_mut, Gene %in% cancer_genes) %>%
+  select(-Entrez, -Details, -Label) %>% #Check activatng mutations
+  mutate(Category=1) %>% distinct %>%
+  spread(key="Gene", value="Category", fill=0)
+
+PDX_mut_test <- PDX_mut_test[,c(TRUE, colSums(PDX_mut_test[,-1])/nrow(PDX_mut_test) > 0.05)]
+
+data_rf <- left_join(select(data_test, -KRAS, -PIK3CA),
+                     PDX_mut_test)
+
+genes <- colnames(PDX_mut_test)[-1]
+
+fit_all <- randomForestSRC::rfsrc(formula = as.formula(paste0("ResponseBin ~ Treatment + `", paste0(genes, collapse = "`+`"), "`")),
+           data = as.data.frame(data_rf), 
+           importance = TRUE)
+
+fit_red <- randomForestSRC::rfsrc(formula = ResponseBin ~ Treatment + KRAS + PIK3CA,
+           data = as.data.frame(data_rf),
+           importance = TRUE)
+
+```
+
+
+```{r sandbox, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE}
+
+res <- filter(data_PM, PATIENT_ID %in% patients_PM,
+              Treatment %in% c("untreated", "LEE011", "BKM120", "encorafenib")) %>%
+  group_by(Treatment, BRAF) %>% summarise(M=mean(BestAvgResponse))
+
+big_drugs <- PDX_clin$Treatment %>% table %>% is_greater_than(180) %>% which %>% names
+
+res <- filter(PDX_clin, PATIENT_ID %in% common_patients_PM1, Treatment %in% big_drugs) %>%
+  left_join(PDX_PM1) %>%
+  group_by(Treatment, MKI67) %>% summarise(M=mean(BestAvgResponse))
+
+#TEST
+
+PDX_mut_test <- filter(PDX_mut) %>%
+  select(-Entrez, -Details, -Label) %>% #Check activatng mutations
+  mutate(Category=1) %>% distinct %>%
+  spread(key="Gene", value="Category", fill=0)
+
+t <- left_join(select(PDX_mut_test, PATIENT_ID, BRAF, KRAS, PTEN, PIK3CA, TP53, NRAS, CDKN2A),
+               filter(PDX_clin, Treatment %in% c("binimetinib", "BYL719")) %>%
+                 pivot_wider(names_from=Treatment, values_from=BestAvgResponse), 
+               by="PATIENT_ID")
+
+fit <- lm(binimetinib~TP53+BRAF+KRAS+PTEN+PIK3CA+NRAS, data=t)
+summary(fit)
+
+fit <- lm(BYL719~BRAF+PTEN+PIK3CA+CDKN2A, data=t)
+summary(fit)
+
+genes <- read.table("PreMedCaus/cancer_genes_COSMIC.txt", skip = 1) %>% unlist
+t_mut <- select(PDX_mut_test, PATIENT_ID, one_of(genes))
+t_mut <- t_mut[,c(TRUE,colSums(t_mut[,-1]) >15)]
+t <- left_join(t_mut,
+               filter(PDX_clin, Treatment %in% c("BYL719")) %>%
+                 pivot_wider(names_from=Treatment, values_from=BestAvgResponse) %>%
+                 select(PATIENT_ID, one_of("BYL719", "binimetinib")), 
+               by="PATIENT_ID")
+fit <- randomForestSRC::rfsrc(formula = BYL719 ~.,
+           data = select(t, -PATIENT_ID) %>% as.data.frame)
+var_imp <- randomForestSRC::vimp(fit)
+var_imp$importance %>% sort
+
+#LEE011 biomarker
+t <- inner_join(PDX_clin, PDX_mut_test)
+filter(t, Treatment %in% big_drugs) %>%
+  group_by(Treatment, PIK3CA) %>% summarise(M=mean(BestAvgResponse), N=n())
+
+filter(t, Treatment %in% big_drugs) %>%
+  mutate(CC=if_else(CCNA1==1 | CCND1==1 | CCND2==1 | CCNE1==1 | CDK4==1 | CDK6==1, 1, 0)) %>%
+  group_by(Treatment, CC) %>% summarise(M=mean(BestAvgResponse), N=n())
+
+t2 <- filter(t, Treatment=="LEE011") %>% select(BestAvgResponse, one_of(mutated_genes))
+fit <- randomForestSRC::rfsrc(formula = BestAvgResponse ~.,
+           data = t2)
+
+var_imp <- randomForestSRC::vimp(fit)
+plot(var_imp)
+View(var_imp$importance %>% as.data.frame %>% rownames_to_column(var="Gene"))
+
+t3 <- inner_join(PDX_clin, PDX_RNA)
+
+t4 <- filter(t3, Treatment=="LEE011") %>% select(BestAvgResponse, one_of(cancer_genes))
+fit <- randomForestSRC::rfsrc(formula = BestAvgResponse ~.,
+           data = t4)
+
+var_imp <- randomForestSRC::vimp(fit)
+plot(var_imp)
+View(var_imp$importance %>% as.data.frame %>% rownames_to_column(var="Gene"))
+
+```
+
+```{r toc, echo=FALSE, message=FALSE, warning=FALSE,  fig.height = 8, fig.width = 10, eval=TRUE}
+print("Computation done in:")
+toc()
+```
