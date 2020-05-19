@@ -1,7 +1,7 @@
 ---
-title: "Precision medicine and causality - Simulation study V7"
+title: "Precision medicine and causality - Simulation"
 author: "Jonas BÉAL"
-date: "11/15/2019"
+date: "5/18/2020"
 output:
   html_document:
     number_sections: yes
@@ -9,11 +9,6 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-
-#Paths
-original_path <- normalizePath(getwd())
-base_folder <- dirname(original_path)
-knitr::opts_knit$set(root.dir = base_folder,fig.align='center')
 
 #Packages
 if (!require("pacman")) install.packages("pacman")
@@ -40,7 +35,7 @@ We want to perform a quantitative evaluation of precision medicine (PM) strategi
 
 ## Target trials
 
-![Target trials to estimate causal effect of precision medicine (PM) algorithm versus different controls. Patients are first screened according to their eligibility for the algorithm: based on their genomic characteristics patients are recommended a specific treatment (eligible) or not (no eligible). Then eligible patients are randomized and assigned either to PM-directed arm or to one of the alternative control arms (CE_1, CE_2 or CE_3)](Manuscript PreMedCaus/Pictures/Target_Trials.png)
+![Target trials to estimate causal effect of precision medicine (PM) algorithm versus different controls. Patients are first screened according to their eligibility for the algorithm: based on their genomic characteristics patients are recommended a specific treatment (eligible) or not (no eligible). Then eligible patients are randomized and assigned either to PM-directed arm or to one of the alternative control arms (CE_1, CE_2 or CE_3)](Pictures/Target_Trials.png)
 
 We define 3 different target trials comparing a precision medicine arm with 3 different control arms therefore defining 3 different causal effects CE1/CE2/CE3.
 
@@ -56,7 +51,7 @@ All these effects are defined only for PM-eligible patients, i.e for patients wh
 
 We will use the potential outcomes framework to estimates the causal effects described in previous section with observational data. Below, we summarize very briefly the variables we use to model our precision medicine settings. Please refer to the article for a detailed description of potential outcomes framework, counterfactual variables and the impact of the multiplicity of versions of treatment.
 
-![Causal diagram in Precision Medicine](Manuscript PreMedCaus/Pictures/DAG_multiple.png)
+![Causal diagram in Precision Medicine](Pictures/DAG_multiple.png)
 
 We have:
 
@@ -127,15 +122,10 @@ simulated_data_plot <- function(df){
     summarise(n = n()) %>%
     mutate(Drug_PM=case_when(
       set=="C1" ~ "k_1",
-      #set=="C1-C3" ~ "k_1",
-      #set=="C1-C2-C3" ~ "k_1",
       set=="C2" ~ "k_2",
       set=="C1-C2" ~ "k_1",
-      #set=="C3" ~ "k_3",
-      #set=="C2-C3" ~ "k_3",
       set=="None" ~ "None"
     )) %>%
-    #mutate(Drug_PM=c("k_1", "k_2", "k_1", "k_1", "k_2", "k_3", "k_3", "None")) %>%
     arrange(Drug_PM) %>%
     mutate(set = factor(set, levels=set),
            prop=round(n/sum(n), digits=3),
@@ -229,82 +219,6 @@ simulated_data_plot <- function(df){
           plot.title = element_text(hjust = 0.5)) +
     labs(x=TeX("$Y(1, r(C))$"))
   
-  #Sankey plot with ggalluvial
-  # plot_sankey <- mutate(sim_data,
-  #                       K=if_else(set=="None", factor("None", levels = c("k_1", "k_2", "k_0", "None")), K),
-  #                       set=factor(set, levels = set_order$set) %>% fct_rev,
-  #                       K_PM=fct_recode(K_PM, `K_PM=k1`="k_1",
-  #                                       `K_PM=k2`="k_2",
-  #                                       `K_PM=None`="None") %>%
-  #                         factor(levels=c("K_PM=None",
-  #                                         "K_PM=k2", "K_PM=k1")),
-  #                       K=fct_recode(K, `K=k1`="k_1",
-  #                                    `K=k2`="k_2",
-  #                                    `K=k0`="k_0") %>%
-  #                         factor(levels=c("None", "K=k0",
-  #                                         "K=k2", "K=k1"))) %>%
-  #   group_by(set, K_PM, K) %>%
-  #   summarise(Freq=n()) %>%
-  #   ggplot(aes(y = Freq, axis1 = set, axis2 = K_PM, axis3= K)) +
-  #   geom_alluvium(aes(fill = K_PM), width = 1/3) +
-  #   geom_stratum() +
-  #   geom_text(stat = "stratum", label = c(paste0(set_order$prop*100,"%"),
-  #                                         paste0("K_PM\n=\nk",1:2), "K_PM\n=\nNone",
-  #                                         paste0("K=k",1:2), "K=k0", "None"),
-  #             size=3) +
-  #   scale_x_discrete(limits = c("% patients", "K_PM", "K"), expand = c(.01, .01)) +
-  #   scale_fill_manual(values = colors_drugs_sankey,
-  #                     guide = guide_legend(direction = "horizontal")) +
-  #   theme(legend.position = "right",
-  #         legend.title = element_text(face="bold", size=10),
-  #         legend.text = element_text(size=8),
-  #         axis.title.y=element_blank(),
-  #         axis.text.y=element_blank(),
-  #         axis.line.y=element_blank(),
-  #         axis.ticks.y=element_blank(),
-  #         panel.grid = element_blank(),
-  #         panel.grid.major.y = element_blank(),
-  #         panel.background = element_blank()) +
-  #   labs(fill="K_PM:")
-  
-  plot_sankey <- mutate(sim_data,
-                        K=if_else(set=="None", factor("None", levels = c("k_1", "k_2", "k_0", "None")), K),
-                        set=factor(set, levels = set_order$set) %>% fct_rev,
-                        K_PM=fct_recode(K_PM, `K_PM=k1`="k_1",
-                                        `K_PM=k2`="k_2",
-                                        `K_PM=None`="None") %>%
-                          factor(levels=c("K_PM=None",
-                                          "K_PM=k2", "K_PM=k1")),
-                        K=fct_recode(K, `K=k1`="k_1",
-                                     `K=k2`="k_2",
-                                     `K=k0`="k_0") %>%
-                          factor(levels=c("None", "K=k0",
-                                          "K=k2", "K=k1"))) %>%
-    group_by(set, K_PM, K) %>%
-    summarise(Freq=n()) %>%
-    ggplot(aes(y = Freq, axis1 = set, axis2 = K_PM, axis3= K)) +
-    geom_alluvium(aes(fill = K_PM), width = 1/3) +
-    geom_stratum() +
-    geom_text(stat = "stratum", label = c(paste0(set_order$prop*100,"%"),
-                                          TeX("$k^1_1$"),
-                                          TeX("$k^1_2$"), "None",
-                                          TeX("$k^1_1$"),TeX("$k^1_2$"), TeX("$k^0$"), "None"),
-              size=3) +
-    scale_x_discrete(limits = c("% patients", "r(C)", "K"), expand = c(.01, .01)) +
-    scale_fill_manual(values = colors_drugs_sankey,
-                      guide = guide_legend(direction = "horizontal")) +
-    theme(legend.position = "right",
-          legend.title = element_text(face="bold", size=10),
-          legend.text = element_text(size=8),
-          axis.title.y=element_blank(),
-          axis.text.y=element_blank(),
-          axis.line.y=element_blank(),
-          axis.ticks.y=element_blank(),
-          panel.grid = element_blank(),
-          panel.grid.major.y = element_blank(),
-          panel.background = element_blank()) +
-    labs(fill="K_PM:")
-  
   plot_sankey <- mutate(sim_data,
                         K=if_else(set=="None", factor("None", levels = c("k_1", "k_2", "k_0", "None")), K),
                         set=factor(set, levels = set_order$set) %>% fct_rev,
@@ -358,7 +272,6 @@ print("Done")
 We define the function *random_cohorts* to compute all causal estimates with different methods.
 
 ```{r PM_random, echo=FALSE, message=FALSE, warning=FALSE, eval=TRUE}
-#super_populations <- sim_data1
 list_genes <- c("C_1", "C_2")
 list_treatments <- c("k_1", "k_2")
 
@@ -618,13 +531,6 @@ random_cohorts <- function(super_populations, size_cohorts=200, number_cohorts=1
       mutate(H1=if_else(CE1==1, 1/gKPM, 0),
              H0=if_else(CE1==0, 1/(1-gA), 0))
     
-    # cohort_i_tmle_CE1 <- mutate(cohort_i_tmle,
-    #                             CE1=if_else(A==0, 0, if_else(PM==1, 1, NA_real_))) %>%
-    #   filter(!is.na(CE1)) %>%
-    #   mutate(H1=1/gKPM,
-    #          H0=-1/(1-gA),
-    #          HN=CE1/gKPM - (1-CE1)/(1-gA))
-    
     if (bin==FALSE){
     fit <- glm(Y ~ -1 + H0 + H1 + offset(Q0_K),
                data = cohort_i_tmle_CE1,
@@ -635,20 +541,11 @@ random_cohorts <- function(super_populations, size_cohorts=200, number_cohorts=1
                              Q1_KPM=Q0_KPM+fit[2]*H1)
     } else {
       fit <- glm(Y ~ -1 + H0 + H1 + offset(qlogis(Q0_K)),
-              #glm(Y ~ -1 + H0 + H1 + offset(Q0_K),
                data = cohort_i_tmle_CE1,
                family = fam) %>%
         coef
       cohort_i_tmle_CE1 %<>% mutate(Q1_A0=plogis(qlogis(Q0_A0)+fit[1]*H0),
                              Q1_KPM=plogis(qlogis(Q0_KPM)+fit[2]*H1))
-      
-      # fit <- glm(Y ~ -1 + HN + offset(qlogis(Q0_K)),
-      #         #glm(Y ~ -1 + H0 + H1 + offset(Q0_K),
-      #          data = cohort_i_tmle_CE1,
-      #          family = fam) %>%
-      #   coef
-      # cohort_i_tmle_CE1 %<>% mutate(Q1_A0=plogis(qlogis(Q0_A0)+fit*H0),
-      #                        Q1_KPM=plogis(qlogis(Q0_KPM)+fit*H1))
     }
     
     res[i, "CE1_TMLE"] <- with(cohort_i_tmle_CE1, mean(Q1_KPM-Q1_A0))
@@ -700,7 +597,6 @@ random_cohorts <- function(super_populations, size_cohorts=200, number_cohorts=1
 
       } else {
         fit <- glm(as.formula(paste0("Y ~ -1 + H0_", t," + H1 + offset(qlogis(Q0_K))")),
-                #glm(as.formula(paste0("Y ~ -1 + H0_", t," + H1 + offset(Q0_K)")),
                    data = cohort_i_tmle_CE3,
                    family = fam) %>%
           coef
@@ -738,9 +634,6 @@ colors_methods <- c("True"= "#376597FF", "Std"="#928F6BFF", "IPW"="#CCAF69FF",
                     "TMLE"="#556246FF",
                     "Naive"="#8F5144FF")
 
-#input_data <- sim_data1_random
-#CEi <- "CE1"
-#te <- true_effects(sim_data1)
 plot_CE <- function(input_data, CEi, te){
   te_CEi <- te[CEi] %>% unlist %>% unname
   
@@ -801,35 +694,6 @@ plot_CE <- function(input_data, CEi, te){
         theme(legend.justification = "center",
               legend.text = element_text(size=8),
               legend.title = element_text(face="bold", size=10))
-    
-    #Scatter plot for estimates
-    # p_scatter <- pivot_longer(plot_data, any_of(c("Naive", "Std", "IPW", "TMLE")),
-    #                           names_to = "Method", values_to = "Estimate") %>%
-    #   mutate(Method=factor(Method, levels=c("TMLE", "Std","IPW", "Naive"))) %>%
-    #   ggplot(aes(x=True, y=Estimate)) +
-    #   geom_point(aes(color=Method), size=0.6, show.legend = FALSE) +
-    #   geom_abline(aes(slope = 1, intercept = 0, linetype = "y = x"),
-    #               lwd=1,show.legend=TRUE) +
-    #   geom_smooth(method = "lm", formula =y ~ x, aes(linetype = "y = ax+b"),
-    #               color="black",show.legend=FALSE) +
-    #   stat_cor(aes(label = `..r.label..`), p.digits =1, label.sep = '\n') +
-    #   facet_grid(.~Method)  +
-    #   scale_color_manual(values=c(colors_methods)) +
-    #   scale_linetype_manual(values= c("y = x"="solid", "y = ax+b"="dashed"),
-    #                         guide = guide_legend(direction = "vertical",
-    #                                              override.aes=list(fill=NA))) +
-    #   labs(title = paste0(CEi," estimates compared to true effects"),
-    #        x="True estimates",
-    #        y="Estimates from\nobserved data",
-    #        linetype="Lines") +
-    #   theme_pubclean() +
-    #   theme(legend.justification = "center",
-    #         legend.text = element_text(size=8),
-    #         legend.title = element_text(face="bold", size=10)) +
-    #   guides(color=FALSE)
-    
-    #((p_distrib / (p_diff + p_perf) / p_scatter) | guide_area()) +
-    #  plot_layout(guides = 'collect', widths = c(6,1))
     
     ((p_distrib / (p_diff + p_perf)) | guide_area()) +
       plot_layout(guides = 'collect', widths = c(6,1))
@@ -1020,8 +884,6 @@ process_sim_data <- function(df){
 set.seed(1)
 sim_data1 <- sim(m1,10000) %>% process_sim_data
 
-#plot(m1, labels = T, diag = T)
-
 ```
 
 Here are some plots and models to summarize the nature of generated data.
@@ -1110,8 +972,6 @@ plot_CE_summary(sim_data1_random, true_effects1)
 plot_CE(sim_data1_random, "CE1", true_effects1)
 
 ```
-
-What can we deduce from these plots?
 
 ### CE2
 
@@ -1220,48 +1080,6 @@ plot_scenario2 <- wrap_plots(simulated_data_plot(sim_data2),
 #ggsave(file="Simulation_Additional.svg", plot=plot_scenario1, width=9, height=8)
 
 #ggsave(file="Simulation_Results.svg", plot=plot_scenario2, width=9, height=8)
-
-
-```
-
-# Second scenario: binary alternative
-
-Here we adapt the second scenario to have binary outcomes. $Y=1$ correspond to responder and $Y=0$ to non-responders. 
-
-```{r scenario_2bis, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE,  fig.height = 8, fig.width = 10}
-
-values <- select(sim_data2, Y_0, Y_1, Y_2) %>% unlist
-m <- mean(values)
-s <- 2*sd(values)
-
-binarize <- function(x){
-  res <- pnorm(x, mean = m, sd=s) %>% rbernoulli(1, p=.) %>% `!`
-  return(as.numeric(res))
-}
-
-sim_data3 <- mutate_at(sim_data2, c("Y_0", "Y_1", "Y_2"),
-                       function(x) binarize(x))
-
-sim_data3 <- sim_data2
-for (i in 1:nrow(sim_data3)){
-  sim_data3[i, "Y_0"] <- binarize(sim_data3[i, "Y_0"])
-  sim_data3[i, "Y_1"] <- binarize(sim_data3[i, "Y_1"])
-  sim_data3[i, "Y_2"] <- binarize(sim_data3[i, "Y_2"])
-}
-sim_data3 %<>% column_to_rownames(var="PATIENT_ID") %>% process_sim_data
-
-```
-
-Now let's compute our causal effects.
-
-```{r scenario2bis_random, echo=FALSE, message=FALSE, warning=FALSE, eval=FALSE}
-true_effects3 <- true_effects(sim_data3)
-publish(true_effects3)
-
-sim_data3_random <- random_cohorts(sim_data3, bin = TRUE)
-print("Done")
-
-plot_CE_summary(sim_data3_random, true_effects3)
 ```
 
 ```{r toc, echo=FALSE, message=FALSE, warning=FALSE,  fig.height = 8, fig.width = 10, eval=TRUE}
