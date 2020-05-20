@@ -19,8 +19,6 @@ pacman::p_load(c("shiny", "shinydashboard", "rhandsontable", "DT",
 #Define some color vectors
 colors_genes <- c(paletteer_d("nord::lumina"))
 
-#colors_drugs <- c(paletteer_d("nord::aurora"))
-#colors_drugs <- c(paletteer_d("ghibli::MononokeMedium"))[-c(1,4)]
 colors_drugs <- c(paletteer_d("ggsci::default_uchicago"))[c(1,3,4,5,9)]
 
 #colors_methods <- c(paletteer_d("nord::red_mountain"))
@@ -103,7 +101,7 @@ ui <- dashboardPage(
                ),
                fluidRow(
                  box(
-                   title = "2.4. Proportions of personalized treatments \\(K_{PM}\\)",
+                   title = "2.4. Proportions of personalized treatments \\(K_{PM}=r(C)\\)",
                    solidHeader = FALSE, status = "primary", width=6,
                    plotOutput("treatment_assignment_hot_plot_render")
                  ),
@@ -182,7 +180,6 @@ ui <- dashboardPage(
                        choices = c("MAE", "RMSE"),
                        select="MAE"
                      ),
-                     #plotOutput("estimates_plot"),
                      selectizeInput(
                        'estimates_PCA_var', 'PCA variables:',
                        choices = c("Genes", "K_PM", "Both"),
@@ -211,10 +208,11 @@ ui <- dashboardPage(
                )
        ),
        
-       #Fifth
+       #Fifth tab content
        tabItem(tabName = "background",
                h2("Background"),
-               h4("Let's summarize a bit the precision medicine problem and our theoretical background")
+               h4("Please refer to the original article for details abot the objectives and methods of this work. Below is the schematic representation of the target trials and the subsequent definition of \\(CE_{1}\\), \\(CE_{2}\\) and \\(CE_{3}\\)"),
+               imageOutput("photo")
        )
      )
    )
@@ -223,7 +221,6 @@ ui <- dashboardPage(
 # Define server logic
 server <- function(input, output) {
   
-
   #Here we define the editable table to rename genes and define their prevalence in the super population
   output$genes_prevalence <-  renderRHandsontable({
     data.frame(
@@ -372,7 +369,7 @@ server <- function(input, output) {
                h4(if_else(i=="k_0",
                           "Generic parameters (CAUTION, k_0 correspond to the control/untreated):",
                           "Generic parameters:")),
-               sliderInput(paste0("slider_treat_Int_",i), paste0("Intercept for response to ", i), -50, 50, step = 5, value=if_else(i=="k_0", 50, 0)),
+               sliderInput(paste0("slider_treat_Int_",i), paste0("Intercept for response to ", i), -50, 50, step = 5, value=if_else(i=="k_0", 10, 0)),
                sliderInput(paste0("slider_treat_Cov_",i), paste0("Variance for response to ", i), 0, 100, step = 5, value=25),
                br(),
                h4("Influence of biomarkers:"),
@@ -406,23 +403,61 @@ server <- function(input, output) {
     df
   })
   
+   treatment_inter <- reactive({
+     list_treatments <- c("k_0",input$list_treatments)
+     df <- data.frame(matrix(ncol=length(list_treatments),nrow=1,
+                             dimnames=list(c("Intercepts"), list_treatments)))
+   
+     for (t in list_treatments){
+       df[1,t] <- input[[paste0("slider_treat_Int_", t)]]
+     }
+     df
+   })
+  
   #Visualize treatment parameters
   output$treatment_params_plot <- renderPlot({
     validate(
       need(input$slider_treat_k_0_Aggressiveness, label="Parameters")
     )
-    treatment_params() %>%
+    list_genes <- input$genes_prevalence %>% hot_to_r %>% .$Genes
+    p_coeff <- treatment_params() %>%
       rownames_to_column(var="Variable") %>%
       pivot_longer(-Variable, names_to="Treatment", values_to="Parameter") %>%
       mutate(Variable=if_else(Variable=="Aggressiveness", "Agg.", Variable),
-             Treatment=factor(Treatment, levels=c("k_0", input$list_treatments))) %>%
+             Treatment=if_else(Treatment=="k_0", paste0('Y(0,', Treatment, ')'), paste0('Y(1,', Treatment, ')')) %>%
+               factor(levels=c("Y(0,k_0)", paste0('Y(1,', input$list_treatments, ')')))) %>%
       ggplot(aes(x=Treatment, y=Variable, fill=Parameter)) +
       geom_tile(color="white") +
       geom_text(aes(label=Parameter)) +
-      scale_fill_paletteer_c("pals::ocean.balance", limits=c(-30, 30)) +
+      scale_fill_paletteer_c("pals::ocean.balance", limits=c(-50, 50)) +
       theme_pubclean() +
-      theme(legend.position = "right") +
-      labs(title = "Dependencies of treatment effects")
+      theme(legend.position = "bottom") +
+      labs(#title = "Linear regression coefficients",
+           subtitle = "Linear regression coefficients",
+           x = "Response to treatments",
+           y = "Regr. coeff.")
+    
+     p_inter <- treatment_inter() %>%
+       rownames_to_column(var="Variable") %>%
+       pivot_longer(-Variable, names_to="Treatment", values_to="Parameter") %>%
+       mutate(Treatment=if_else(Treatment=="k_0", paste0('Y(0,', Treatment, ')'), paste0('Y(1,', Treatment, ')')) %>%
+                factor(levels=c("Y(0,k_0)", paste0('Y(1,', input$list_treatments, ')')))) %>%
+       ggplot(aes(x=Treatment, y=Variable, fill=Parameter)) +
+       geom_tile(color="white", show.legend = FALSE) +
+       geom_text(aes(label=Parameter), show.legend = FALSE) +
+       scale_fill_paletteer_c("pals::ocean.balance", limits=c(-50, 50)) +
+       theme_pubclean() +
+       theme(axis.text.y = element_blank(),
+             axis.ticks.y = element_blank(),
+             axis.title.x = element_blank()) +
+       labs(subtitle = "Linear regression intercepts",
+            title = paste0("Y(a, k_a) ~ ", paste0(list_genes, collapse = ' + ')),
+            #x = "Response to treatments",
+            y = "Intercepts")
+    
+    (p_inter / p_coeff) +
+      plot_layout(heights = c(1,3))
+
   })
   
   
@@ -543,11 +578,9 @@ server <- function(input, output) {
       geom_tile(aes(fill=K_PM, alpha=as.factor(value)), color="white")  +
       geom_text(aes(label=label), colour="white", size=3,fontface = "bold") +
       theme_pubclean() +
-      theme(#axis.text.x=element_text(angle=90, hjust=0, vjust=0.5),
-            plot.title = element_text(hjust = 0.5),
+      theme(plot.title = element_text(hjust = 0.5),
             panel.grid.major.y = element_blank(),
-            panel.grid.minor.y = element_blank()
-            ) +
+            panel.grid.minor.y = element_blank()) +
       scale_fill_manual(values=data_colors_drugs()) +
       scale_alpha_manual(values = c(0.2,1)) +
       scale_y_continuous(breaks = y_axis_figures, label = y_axis_labels) +
@@ -580,8 +613,6 @@ server <- function(input, output) {
                             droplevels %>% fct_rev) %>%
       group_by(set, K_PM, K) %>%
       summarise(Freq=n())
-      #left_join(select(set_order, set, prop) %>% mutate(set=fct_rev(set)), by="set") %>%
-      #mutate(set_percent=paste0(100*prop,"%")) %>%
       
     colors_drugs_sankey <- data_colors_drugs()
     names(colors_drugs_sankey) <- paste0("K_PM=", names(colors_drugs_sankey))
@@ -590,8 +621,6 @@ server <- function(input, output) {
       ggplot(aes(y = Freq, axis1 = set, axis2 = K_PM, axis3= K)) +
       geom_alluvium(aes(fill = K_PM),width = 1/3) +
       geom_stratum() +
-      #stat_stratum(decreasing = NA) +
-      #geom_text(stat = "stratum", label = c("a", "b", "a", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o")) +
       geom_text(stat = "stratum", label = c(paste0(set_order$prop*100,"%"),
                                             levels(data_sankey$K_PM %>% fct_rev),
                                             levels(data_sankey$K %>% fct_rev)),
@@ -717,7 +746,6 @@ server <- function(input, output) {
         std1 <- glm(as.formula(paste0("Y ~ K_1KPM*(",
                                       paste0(list_genes, collapse = "+"),
                                       ")")),
-                    #Y ~ K_1KPM*(C_1 + C_2 + C_3),
                     data = cohort_i_std)
         cohort_i_std %<>% mutate(K_1KPM=K_PM) %>% mutate(Y_1KPM=predict(std1, .))
         
@@ -734,7 +762,6 @@ server <- function(input, output) {
         std2 <- glm(as.formula(paste0("Y ~ A_01*(",
                                       paste0(list_genes, collapse = "+"),
                                       ")")),
-                    #Y ~ A_01*(C_1 + C_2 + C_3),
                     data = cohort_i_std)
         cohort_i_std %<>% mutate(A_01=0) %>% mutate(Y_0_k0=predict(std2, .))
         #Y_1_K: estimate the counterfactual outcome corresponding to all patients treated with physician's treatment (for CE2)
@@ -859,7 +886,6 @@ server <- function(input, output) {
           mutate(H1=if_else(CE1==1, 1/gKPM, 0),
                  H0=if_else(CE1==0, 1/(1-gA), 0))
         
-        #if (bin==FALSE){
           fit <- glm(Y ~ -1 + H0 + H1 + offset(Q0_K),
                      data = cohort_i_tmle_CE1#,family = fam
                      ) %>%
@@ -867,14 +893,6 @@ server <- function(input, output) {
           
           cohort_i_tmle_CE1 %<>% mutate(Q1_A0=Q0_A0+fit[1]*H0,
                                         Q1_KPM=Q0_KPM+fit[2]*H1)
-        # } else {
-        #   fit <- glm(Y ~ -1 + H0 + H1 + offset(qlogis(Q0_K)),
-        #              data = cohort_i_tmle_CE1,
-        #              family = fam) %>%
-        #     coef
-        #   cohort_i_tmle_CE1 %<>% mutate(Q1_A0=plogis(qlogis(Q0_A0)+fit[1]*H0),
-        #                                 Q1_KPM=plogis(qlogis(Q0_KPM)+fit[2]*H1))
-        # }
         
         res[i, "CE1_TMLE"] <- with(cohort_i_tmle_CE1, mean(Q1_KPM-Q1_A0))
         
@@ -884,7 +902,6 @@ server <- function(input, output) {
           mutate(H1=if_else(CE2==1, 1/gKPM, 0),
                  H0=if_else(CE2==0, 1/(gA), 0))
         
-        #if (bin==FALSE){
           fit <- glm(Y ~ -1 + H0 + H1 + offset(Q0_K),
                      data = cohort_i_tmle_CE2#,family = fam
                      ) %>%
@@ -892,14 +909,6 @@ server <- function(input, output) {
           
           cohort_i_tmle_CE2 %<>% mutate(Q1_A1=Q0_A1+fit[1]*H0,
                                         Q1_KPM=Q0_KPM+fit[2]*H1)
-        # } else {
-        #   fit <- glm(Y ~ -1 + H0 + H1 + offset(qlogis(Q0_K)),
-        #              data = cohort_i_tmle_CE2,
-        #              family = fam) %>%
-        #     coef
-        #   cohort_i_tmle_CE2 %<>% mutate(Q1_A1=plogis(qlogis(Q0_A1)+fit[1]*H0),
-        #                                 Q1_KPM=plogis(qlogis(Q0_KPM)+fit[2]*H1))
-        # }
         
         res[i, "CE2_TMLE"] <- with(cohort_i_tmle_CE2, mean(Q1_KPM-Q1_A1))
         
@@ -911,7 +920,6 @@ server <- function(input, output) {
         for (t in list_treatments){
           cohort_i_tmle_CE3[,paste0("H0_", t)] <- if_else(cohort_i_tmle_CE3$K==t, 1/cohort_i_tmle_CE3[,paste0("gK_", t)], 0)
           
-          #if (bin==FALSE){
             fit <- glm(as.formula(paste0("Y ~ -1 + H0_", t," + H1 + offset(Q0_K)")),
                        data = cohort_i_tmle_CE3#,family = fam
                        ) %>%
@@ -921,19 +929,6 @@ server <- function(input, output) {
               cohort_i_tmle_CE3[,paste0("Q0_K", t)]+fit[1]*cohort_i_tmle_CE3[,paste0("H0_", t)]
             cohort_i_tmle_CE3[,paste0("Q1_KPM", t)] <-
               cohort_i_tmle_CE3[,"Q0_KPM"]+fit[2]*cohort_i_tmle_CE3[,"H1"]
-            
-          # } else {
-          #   fit <- glm(as.formula(paste0("Y ~ -1 + H0_", t," + H1 + offset(qlogis(Q0_K))")),
-          #              data = cohort_i_tmle_CE3,
-          #              family = fam) %>%
-          #     coef
-          #   
-          #   cohort_i_tmle_CE3[,paste0("Q1_K", t)] <-
-          #     plogis(qlogis(cohort_i_tmle_CE3[,paste0("Q0_K", t)])+fit[1]*cohort_i_tmle_CE3[,paste0("H0_", t)])
-          #   cohort_i_tmle_CE3[,paste0("Q1_KPM", t)] <-
-          #     plogis(qlogis(cohort_i_tmle_CE3[,"Q0_KPM"])+fit[2]*cohort_i_tmle_CE3[,"H1"])
-          #   
-          # }
           
           cohort_i_tmle_CE3[, paste0("CE3_", t)] <- cohort_i_tmle_CE3[, paste0("Q1_KPM", t)]-
             cohort_i_tmle_CE3[, paste0("Q1_K", t)]
@@ -955,6 +950,7 @@ server <- function(input, output) {
     CEi <- input$estimates_select
     te <- true_effects(simulated_data())
     dev_metric <- input$estimates_perf
+    val <- gsub("CE", "", CEi)
     
     te_CEi <- te[CEi] %>% unlist %>% unname
     
@@ -974,17 +970,10 @@ server <- function(input, output) {
                   mutate(Estimate=min(Min)-0.05*(max(Max)-min(Min))),
                 aes(x=Method, label=N), size=3) +
       scale_fill_manual(values=colors_methods) +
-      #geom_hline(aes(linetype="True effect in super-population",
-      #               yintercept = TE)) +
-      #scale_linetype_manual(name="Reference",
-      #                      values=c("True effect in super-population"="dashed")) +
-      labs(title=paste0(CEi," distribution and methods")) +
+      labs(title=bquote(CE[.(val)] ~ " distributions")) +
       theme_pubclean() +
-      theme(#plot.title = element_text(size = 10),
-            legend.position = "bottom",
-            legend.title = element_text(face="bold")#,
-            #legend.text = element_text(size = 8)
-            )
+      theme(legend.position = "bottom",
+            legend.title = element_text(face="bold"))
     
     #Deviations
     p_diff <-pivot_longer(plot_data, any_of(c("Naive", "Std", "IPW", "TMLE")),
@@ -993,19 +982,12 @@ server <- function(input, output) {
              Diff=Estimate-True) %>%
       ggplot(aes(x=Method, y=Diff, fill=Method)) +
       geom_boxplot(alpha=1, show.legend = FALSE, varwidth = FALSE, width=0.4) +
-      #geom_text(data = . %>% filter(!is.nan(Diff)) %>% group_by(Method) %>%
-      #            summarise(N=paste0("n=",n()), Min=min(Diff), Max=max(Diff)) %>%
-      #            mutate(Diff=min(Min)-0.05*(max(Max)-min(Min))),
-      #          aes(x=Method, label=N)) +
       scale_fill_manual(values=colors_methods) +
-      labs(title=paste0(CEi," deviations from true effects"),
+      labs(title=bquote(CE[.(val)] ~ " deviations"),
            y="Deviation value") +
       theme_pubclean() +
-      theme(#plot.title = element_text(size = 10),
-        legend.position = "bottom",
-        legend.title = element_text(face="bold")#,
-        #legend.text = element_text(size = 8)
-      )
+      theme(legend.position = "bottom",
+            legend.title = element_text(face="bold"))
     
     #Performances
     p_perf_plot <-pivot_longer(plot_data, any_of(c("Naive", "Std", "IPW", "TMLE")),
@@ -1053,24 +1035,16 @@ server <- function(input, output) {
       scale_linetype_manual(values= c("y = x"="solid", "y = ax+b"="dashed"),
                             guide = guide_legend(direction = "vertical",
                                                  override.aes=list(fill=NA))) +
-      labs(title = paste0(CEi," estimates compared to true effects"),
+      labs(title = bquote(CE[.(val)] ~ " estimates compared to true effects"),
            x="True estimates",
            y="Estimates from\nobserved data",
            linetype="Lines") +
       theme_pubclean() +
-      theme(#plot.title = element_text(size = 10),
-            #legend.position = "bottom",
-            legend.justification = "center",
+      theme(legend.justification = "center",
             legend.text = element_text(size=8),
-            legend.title = element_text(face="bold", size=10)
-            #strip.text = element_text(size = 9, face = "bold"),
-            #strip.background = element_rect(color="black")
-            ) +
+            legend.title = element_text(face="bold", size=10),
+            legend.key = element_rect(fill = NA, colour = NA)) +
       guides(color=FALSE)
-    
-    #grid.arrange(p_distrib, p_scatter, nrow=2
-                 #top=paste0("Comprehensive analysis of ", CEi, " estimates")
-    #             )
     
     ((p_distrib / (p_diff + p_perf) / p_scatter) | guide_area()) +
       plot_layout(guides = 'collect', widths = c(6,1))
@@ -1082,6 +1056,7 @@ server <- function(input, output) {
     list_genes <- input$genes_prevalence %>% hot_to_r %>% .$Genes
     list_treatments <- input$list_treatments
     CEi <- input$estimates_select
+    val <- gsub("CE", "", CEi)
     PCA_var <-input$estimates_PCA_var
     PCA_enrich <- input$estimates_PCA_enrich
     PCA_color <- input$estimates_PCA_color
@@ -1090,7 +1065,6 @@ server <- function(input, output) {
       rename_all(funs(str_replace(., paste0(CEi,"_"), ""))) %>%
       mutate(Dev_Naive=(Naive-True), Dev_Std=(Std-True), Dev_IPW=(IPW-True), Dev_TMLE=(TMLE-True))
     
-    #PCA_var <- "K_PM"
     if (PCA_var == "Genes"){
       pca_var <- list_genes
     } else if (PCA_var == "K_PM"){
@@ -1113,7 +1087,6 @@ server <- function(input, output) {
     pca_data_pcs <- pca_data$ind$coord[,1:2]
     plot_data_pca %<>% cbind.data.frame(pca_data_pcs)
     
-    #PCA_color <- "Deviation from true CE"
     if (PCA_color == "Absolute CE"){
       plot_data_pca %<>% pivot_longer(any_of(c("Naive", "Std", "IPW", "TMLE")),
                                       names_to = "Method", values_to = "Estimate") %>%
@@ -1125,8 +1098,6 @@ server <- function(input, output) {
         mutate(Method=factor(Method, levels=c("Dev_TMLE", "Dev_Std","Dev_IPW", "Dev_Naive")))
       l <- c(-max(abs(plot_data_pca$Estimate), na.rm = T), max(abs(plot_data_pca$Estimate), na.rm = T))
     } 
-    
-    
     
     #Compute PCA utilities for further plots
     axes <- c(1, 2)
@@ -1144,7 +1115,6 @@ server <- function(input, output) {
                  aes(x=Dim.1, y=Dim.2,color=Estimate)
       ) +
       scale_color_paletteer_c("pals::ocean.delta", limits=l) +
-      #scale_color_paletteer_c("scico::roma", limits=l) +
       geom_segment(data=data_arrow,
                    aes(x=0, y=0, xend=x, yend=y),
                    arrow = arrow(angle = 30, length = unit(2, "mm"),
@@ -1154,7 +1124,7 @@ server <- function(input, output) {
                       box.padding = 0.25, point.padding = 1e-06,
                       segment.size = 0.2, min.segment.length = 0.5) +
       facet_grid(.~Method) +
-      labs(title = paste0("Dependance of ", CEi),
+      labs(title = bquote("Dependance of " ~ CE[.(val)] ~ " to confounders"),
            x=p_arrow_fviz$labels$x,
            y=p_arrow_fviz$labels$y,
            color=PCA_color) +
@@ -1172,6 +1142,14 @@ server <- function(input, output) {
       mutate_if(is.numeric, function(x) round(x, digits=2)) %>%
       datatable(rownames=FALSE)
   })
+  
+  #Target trials pictures
+  output$photo <- renderImage({
+    list(
+      src = file.path("Pictures/Target_Trials.png"),
+      width =600
+    )
+  }, deleteFile = FALSE)
 
 }
 
