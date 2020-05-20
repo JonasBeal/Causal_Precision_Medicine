@@ -7,29 +7,8 @@
 #    http://shiny.rstudio.com/
 #
 
-#Import packages
-# if (!require("pacman")) install.packages("pacman")
-# pacman::p_load(c("shiny", "shinydashboard", "rhandsontable", "DT",
-#                  "tidyverse", "paletteer", "magrittr",
-#                  "eulerr", "ggpubr", "egg", "ggstance", "ggalluvial", "ggrepel",
-#                  "factoextra", "FactoMineR",
-#                  "lava", "nnet", "DescTools", "patchwork"),
-#                character.only = TRUE)
-
-
-# lapply(c("shiny", "shinydashboard", "rhandsontable", "DT",
-#          "tidyverse", "paletteer", "magrittr",
-#          "eulerr", "ggpubr", "egg", "ggstance", "ggalluvial", "ggrepel",
-#          "factoextra", "FactoMineR",
-#          "lava", "nnet", "DescTools", "patchwork"),
-#        library, character.only = TRUE)
-
-#options(repos = BiocManager::repositories())
 library(shiny)
 library(shinydashboard)
-library(BiocManager)
-options(repos = BiocManager::repositories())
-library(oompaBase)
 library(rhandsontable)
 library(DT)
 library(tidyverse)

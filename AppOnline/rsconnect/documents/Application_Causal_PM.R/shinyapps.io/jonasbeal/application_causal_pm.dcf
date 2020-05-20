@@ -4,7 +4,7 @@ username:
 account: jonasbeal
 server: shinyapps.io
 hostUrl: https://api.shinyapps.io/v1
-appId: 2330172
-bundleId: 3170670
+appId: 2331003
+bundleId: 3170944
 url: https://jonasbeal.shinyapps.io/application_causal_pm/
-when: 1589984216.26292
+when: 1589988283.38411
