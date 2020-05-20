@@ -8,13 +8,45 @@
 #
 
 #Import packages
-if (!require("pacman")) install.packages("pacman")
-pacman::p_load(c("shiny", "shinydashboard", "rhandsontable", "DT",
-                 "tidyverse", "paletteer", "magrittr",
-                 "eulerr", "ggpubr", "egg", "ggstance", "ggalluvial", "ggrepel",
-                 "factoextra", "FactoMineR",
-                 "lava", "nnet", "DescTools", "patchwork"),
-               character.only = TRUE)
+# if (!require("pacman")) install.packages("pacman")
+# pacman::p_load(c("shiny", "shinydashboard", "rhandsontable", "DT",
+#                  "tidyverse", "paletteer", "magrittr",
+#                  "eulerr", "ggpubr", "egg", "ggstance", "ggalluvial", "ggrepel",
+#                  "factoextra", "FactoMineR",
+#                  "lava", "nnet", "DescTools", "patchwork"),
+#                character.only = TRUE)
+
+
+# lapply(c("shiny", "shinydashboard", "rhandsontable", "DT",
+#          "tidyverse", "paletteer", "magrittr",
+#          "eulerr", "ggpubr", "egg", "ggstance", "ggalluvial", "ggrepel",
+#          "factoextra", "FactoMineR",
+#          "lava", "nnet", "DescTools", "patchwork"),
+#        library, character.only = TRUE)
+
+#options(repos = BiocManager::repositories())
+library(shiny)
+library(shinydashboard)
+library(BiocManager)
+options(repos = BiocManager::repositories())
+library(oompaBase)
+library(rhandsontable)
+library(DT)
+library(tidyverse)
+library(paletteer)
+library(magrittr)
+library(eulerr)
+library(ggpubr)
+library(egg)
+library(ggstance)
+library(ggalluvial)
+library(ggrepel)
+library(factoextra)
+library(FactoMineR)
+library(lava)
+library(nnet)
+library(DescTools)
+library(patchwork)
 
 #Define some color vectors
 colors_genes <- c(paletteer_d("nord::lumina"))
@@ -1146,7 +1178,7 @@ server <- function(input, output) {
   #Target trials pictures
   output$photo <- renderImage({
     list(
-      src = file.path("Pictures/Target_Trials.png"),
+      src = file.path("fig/Target_Trials.png"),
       width =600
     )
   }, deleteFile = FALSE)
